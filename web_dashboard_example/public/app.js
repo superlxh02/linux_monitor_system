@@ -28,6 +28,74 @@ const theme = createTheme({
     }
 });
 
+const UNIT_MAP = {
+    score: "分",
+    cpu_percent: "%",
+    usr_percent: "%",
+    system_percent: "%",
+    nice_percent: "%",
+    idle_percent: "%",
+    io_wait_percent: "%",
+    irq_percent: "%",
+    soft_irq_percent: "%",
+    mem_used_percent: "%",
+    disk_util_percent: "%",
+    mem_total: "GB",
+    mem_free: "GB",
+    mem_avail: "GB",
+    rcv_rate: "kB/s",
+    send_rate: "kB/s",
+    rcv_bytes_rate: "B/s",
+    snd_bytes_rate: "B/s",
+    rcv_packets_rate: "包/s",
+    snd_packets_rate: "包/s",
+    err_in: "次",
+    err_out: "次",
+    drop_in: "次",
+    drop_out: "次",
+    read_bytes_per_sec: "B/s",
+    write_bytes_per_sec: "B/s",
+    read_iops: "次/s",
+    write_iops: "次/s",
+    avg_read_latency_ms: "ms",
+    avg_write_latency_ms: "ms",
+    util_percent: "%",
+    total: "GB",
+    free: "GB",
+    avail: "GB",
+    buffers: "GB",
+    cached: "GB",
+    swap_cached: "GB",
+    active: "GB",
+    inactive: "GB",
+    active_anon: "GB",
+    inactive_anon: "GB",
+    active_file: "GB",
+    inactive_file: "GB",
+    dirty: "GB",
+    writeback: "GB",
+    anon_pages: "GB",
+    mapped: "GB",
+    hi: "次",
+    timer: "次",
+    net_tx: "次",
+    net_rx: "次",
+    block: "次",
+    irq_poll: "次",
+    tasklet: "次",
+    sched: "次",
+    hrtimer: "次",
+    rcu: "次"
+};
+
+const getUnitByField = (field) => UNIT_MAP[field] || "";
+
+const getMetricUnitByDataKey = (dataKey = "") => {
+    if (dataKey.endsWith("_cpu") || dataKey.endsWith("_mem") || dataKey.endsWith("_disk")) return "%";
+    if (dataKey.endsWith("_net")) return "MB/s";
+    return "";
+};
+
 // --- Dashboard Components ---
 
 const TopStats = ({ clusterStats }) => (
@@ -159,6 +227,13 @@ const ChartSection = ({ servers, nodeHistories, initialNode, initialMetric, onBa
     }, [servers, nodeHistories, selectedMetrics]);
 
     const colors = ["#2196f3", "#f50057", "#00e676", "#ffea00", "#ff9100", "#d500f9", "#00b0ff", "#651fff"];
+    const tooltipFormatter = (value, name, item) => {
+        const unit = getMetricUnitByDataKey(item?.dataKey || "");
+        if (typeof value === "number") {
+            return [`${value.toFixed(2)}${unit ? ` ${unit}` : ""}`, name];
+        }
+        return [value, name];
+    };
 
     return (
         <Card sx={{ height: "100%", display: "flex", flexDirection: "column", p: 0, overflow: "hidden" }}>
@@ -225,7 +300,7 @@ const ChartSection = ({ servers, nodeHistories, initialNode, initialMetric, onBa
                         <CartesianGrid strokeDasharray="3 3" stroke="#2c3e50" />
                         <XAxis dataKey="time" stroke="#546e7a" />
                         <YAxis stroke="#546e7a" />
-                        <Tooltip contentStyle={{ backgroundColor: "rgba(20, 30, 40, 0.9)", border: "1px solid #333" }} />
+                        <Tooltip formatter={tooltipFormatter} contentStyle={{ backgroundColor: "rgba(20, 30, 40, 0.9)", border: "1px solid #333" }} />
                         <Legend wrapperStyle={{ paddingTop: 10 }} />
                         {servers.map((s, i) => {
                             if (!selectedNodes[s.server_name]) return null;
@@ -233,10 +308,10 @@ const ChartSection = ({ servers, nodeHistories, initialNode, initialMetric, onBa
                             const color = fixedMode ? theme.palette.primary.main : colors[i % colors.length];
                             
                             const lines = [];
-                            if (selectedMetrics.cpu) lines.push(<Line key={`l_${s.server_name}_cpu`} type="monotone" dataKey={`${s.server_name}_cpu`} stroke={color} name={`${s.server_name} CPU`} dot={false} strokeWidth={2} />);
-                            if (selectedMetrics.mem) lines.push(<Line key={`l_${s.server_name}_mem`} type="monotone" dataKey={`${s.server_name}_mem`} stroke={color}  name={`${s.server_name} MEM`} dot={false} strokeWidth={2} />);
-                            if (selectedMetrics.disk) lines.push(<Line key={`l_${s.server_name}_disk`} type="monotone" dataKey={`${s.server_name}_disk`} stroke={color}  name={`${s.server_name} DISK`} dot={false} strokeWidth={2} />);
-                            if (selectedMetrics.net) lines.push(<Line key={`l_${s.server_name}_net`} type="monotone" dataKey={`${s.server_name}_net`} stroke={color} strokeWidth={2} name={`${s.server_name} NET`} dot={false} />);
+                            if (selectedMetrics.cpu) lines.push(<Line key={`l_${s.server_name}_cpu`} type="monotone" dataKey={`${s.server_name}_cpu`} stroke={color} name={`${s.server_name} CPU(%)`} dot={false} strokeWidth={2} />);
+                            if (selectedMetrics.mem) lines.push(<Line key={`l_${s.server_name}_mem`} type="monotone" dataKey={`${s.server_name}_mem`} stroke={color}  name={`${s.server_name} MEM(%)`} dot={false} strokeWidth={2} />);
+                            if (selectedMetrics.disk) lines.push(<Line key={`l_${s.server_name}_disk`} type="monotone" dataKey={`${s.server_name}_disk`} stroke={color}  name={`${s.server_name} DISK(%)`} dot={false} strokeWidth={2} />);
+                            if (selectedMetrics.net) lines.push(<Line key={`l_${s.server_name}_net`} type="monotone" dataKey={`${s.server_name}_net`} stroke={color} strokeWidth={2} name={`${s.server_name} NET(MB/s)`} dot={false} />);
                             return lines;
                         })}
                     </LineChart>
@@ -277,7 +352,7 @@ const DetailView = ({ title, metric, servers, onNodeClick }) => {
                             <TableCell>节点名称 (点击查看图表)</TableCell>
                             <TableCell>状态</TableCell>
                             <TableCell align="right" onClick={() => setSort(s => s==="asc"?"desc":"asc")} style={{cursor:"pointer"}}>
-                                当前数值 {sort==="asc"?"↑":"↓"}
+                                当前数值{metric.unit ? ` (${metric.unit})` : ""} {sort==="asc"?"↑":"↓"}
                             </TableCell>
                             <TableCell>趋势可视化</TableCell>
                             <TableCell>其他相关指标</TableCell>
@@ -320,7 +395,7 @@ const DetailView = ({ title, metric, servers, onNodeClick }) => {
                                     </TableCell>
                                     <TableCell>
                                         <Box display="flex" gap={1}>
-                                            <Chip size="small" label={`Load: ${s.load_avg_1?.toFixed(2)}`} />
+                                            <Chip size="small" label={`Load(1m): ${s.load_avg_1?.toFixed(2)}`} />
                                             {metric.key !== "mem_used_percent" && <Chip size="small" label={`Mem: ${s.mem_used_percent?.toFixed(0)}%`} />}
                                         </Box>
                                     </TableCell>
@@ -334,16 +409,19 @@ const DetailView = ({ title, metric, servers, onNodeClick }) => {
     );
 };
 
-const formatCellValue = (value) => {
+const formatCellValue = (value, unit = "") => {
     if (value === null || value === undefined) return "-";
-    if (typeof value === "number") return Number.isInteger(value) ? value : value.toFixed(3);
+    if (typeof value === "number") {
+        const formatted = Number.isInteger(value) ? String(value) : value.toFixed(3);
+        return unit ? `${formatted} ${unit}` : formatted;
+    }
     if (typeof value === "object") {
         if (value.seconds !== undefined) {
             return new Date(Number(value.seconds) * 1000).toLocaleString("zh-CN", { hour12: false });
         }
         return JSON.stringify(value);
     }
-    return String(value);
+    return unit ? `${String(value)} ${unit}` : String(value);
 };
 
 const QueryTableView = ({ title, subtitle, rows, loading, error, emptyText }) => {
@@ -371,7 +449,7 @@ const QueryTableView = ({ title, subtitle, rows, loading, error, emptyText }) =>
                             <TableRow>
                                 <TableCell>#</TableCell>
                                 {columns.map((c) => (
-                                    <TableCell key={c}>{c}</TableCell>
+                                    <TableCell key={c}>{getUnitByField(c) ? `${c} (${getUnitByField(c)})` : c}</TableCell>
                                 ))}
                             </TableRow>
                         </TableHead>
@@ -381,7 +459,7 @@ const QueryTableView = ({ title, subtitle, rows, loading, error, emptyText }) =>
                                     <TableCell>{idx + 1}</TableCell>
                                     {columns.map((c) => (
                                         <TableCell key={`${idx}_${c}`} sx={{ fontFamily: c.includes("rate") || c.includes("percent") ? "monospace" : "inherit" }}>
-                                            {formatCellValue(row[c])}
+                                            {formatCellValue(row[c], getUnitByField(c))}
                                         </TableCell>
                                     ))}
                                 </TableRow>
@@ -777,10 +855,10 @@ const AppShell = () => {
 
         // Detail Views
         const metrics = {
-            cpu: { key: "cpu_percent", icon: "⚡", getValue: s => s.cpu_percent, format: v => `${v.toFixed(1)}%` },
-            mem: { key: "mem_used_percent", icon: "💾", getValue: s => s.mem_used_percent, format: v => `${v.toFixed(1)}%` },
-            disk: { key: "disk_util_percent", icon: "💿", getValue: s => s.disk_util_percent, format: v => `${v.toFixed(1)}%` },
-            net: { key: "net", icon: "🌐", getValue: s => (s.rcv_rate + s.send_rate)/1024, format: v => `${v.toFixed(1)} MB/s`, normalize: v => Math.min(v/10 * 100, 100) } // Mock normalization
+            cpu: { key: "cpu_percent", icon: "⚡", unit: "%", getValue: s => s.cpu_percent, format: v => `${v.toFixed(1)}%` },
+            mem: { key: "mem_used_percent", icon: "💾", unit: "%", getValue: s => s.mem_used_percent, format: v => `${v.toFixed(1)}%` },
+            disk: { key: "disk_util_percent", icon: "💿", unit: "%", getValue: s => s.disk_util_percent, format: v => `${v.toFixed(1)}%` },
+            net: { key: "net", icon: "🌐", unit: "MB/s", getValue: s => (s.rcv_rate + s.send_rate)/1024, format: v => `${v.toFixed(1)} MB/s`, normalize: v => Math.min(v/10 * 100, 100) } // Mock normalization
         };
 
         const m = metrics[view];

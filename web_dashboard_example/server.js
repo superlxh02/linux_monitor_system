@@ -77,13 +77,102 @@ const promisifyGrpc = (method, params = {}) => {
     });
 };
 
+const timestampToMillis = (timestamp) => {
+    if (!timestamp) return 0;
+    const seconds = Number(timestamp.seconds || 0);
+    const nanos = Number(timestamp.nanos || 0);
+    return seconds * 1000 + Math.floor(nanos / 1e6);
+};
+
+const toFiniteNumber = (value) => {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : 0;
+};
+
+const bytesToKB = (bytesPerSec) => toFiniteNumber(bytesPerSec) / 1024;
+
+const buildLatestNetRateMap = (records = []) => {
+    const latestByServer = new Map();
+
+    records.forEach((record) => {
+        const serverName = record.server_name;
+        if (!serverName) return;
+
+        const ts = timestampToMillis(record.timestamp);
+        const current = latestByServer.get(serverName);
+
+        if (!current || ts > current.latestTs) {
+            latestByServer.set(serverName, {
+                latestTs: ts,
+                rcvRate: bytesToKB(record.rcv_bytes_rate),
+                sendRate: bytesToKB(record.snd_bytes_rate)
+            });
+            return;
+        }
+
+        if (ts === current.latestTs) {
+            current.rcvRate += bytesToKB(record.rcv_bytes_rate);
+            current.sendRate += bytesToKB(record.snd_bytes_rate);
+        }
+    });
+
+    return latestByServer;
+};
+
+const fetchLatestNetRateMap = async (serverName) => {
+    const endTime = new Date();
+    const startTime = new Date(endTime.getTime() - 5 * 60 * 1000);
+
+    const response = await promisifyGrpc('QueryNetDetail', {
+        server_name: serverName,
+        time_range: {
+            start_time: { seconds: Math.floor(startTime.getTime() / 1000), nanos: 0 },
+            end_time: { seconds: Math.floor(endTime.getTime() / 1000), nanos: 0 }
+        },
+        pagination: { page: 1, page_size: 1000 }
+    });
+
+    return buildLatestNetRateMap(response.records || []);
+};
+
+const enrichOverviewWithNetRates = async (overviewResponse) => {
+    const servers = overviewResponse.servers || [];
+    const netRateEntries = await Promise.all(
+        servers.map(async (server) => {
+            try {
+                const netRateMap = await fetchLatestNetRateMap(server.server_name);
+                const net = netRateMap.get(server.server_name);
+                return [server.server_name, net || null];
+            } catch (err) {
+                return [server.server_name, null];
+            }
+        })
+    );
+
+    const netRateMap = new Map(netRateEntries);
+    const enrichedServers = servers.map((server) => {
+        const net = netRateMap.get(server.server_name);
+        return {
+            ...server,
+            rcv_rate: net ? net.rcvRate : 0,
+            send_rate: net ? net.sendRate : 0
+        };
+    });
+
+    return {
+        ...overviewResponse,
+        servers: enrichedServers
+    };
+};
+
 // API Endpoints
 
 // Get Latest Scores (Overview)
 app.get('/api/overview', async (req, res) => {
     try {
         const response = await promisifyGrpc('QueryLatestScore', {});
-        res.json(response);
+        const enriched = await enrichOverviewWithNetRates(response);
+        res.json(enriched);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -257,7 +346,8 @@ app.get('/api/query-endpoints', (req, res) => {
 setInterval(async () => {
     try {
         const response = await promisifyGrpc('QueryLatestScore', {});
-        io.emit('overview_update', response);
+        const enriched = await enrichOverviewWithNetRates(response);
+        io.emit('overview_update', enriched);
     } catch (err) {
         // Suppress logs for polling errors to avoid spam if manager is down
     }
