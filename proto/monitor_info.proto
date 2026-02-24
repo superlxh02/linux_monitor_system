@@ -1,0 +1,38 @@
+
+syntax = "proto3";
+package monitor.proto;
+
+import "google/protobuf/empty.proto";
+import "net_info.proto";
+import "mem_info.proto";
+import "cpu_stat.proto";
+import "cpu_softirq.proto";
+import "cpu_load.proto";
+import "disk_info.proto";
+
+//主机标识信息 - 用于调度服务器识别和定位服务器
+message HostInfo {
+  string hostname = 1;       // 主机名
+  string ip_address = 2;     // IP 地址（主网卡 IP）
+}
+
+message MonitorInfo{
+  string name = 1;           // 主机名（保留兼容）
+  HostInfo host_info = 2;    // 主机标识信息
+  repeated SoftIrq soft_irq = 4;
+  CpuLoad cpu_load = 5;
+  repeated CpuStat cpu_stat = 6;
+  MemInfo mem_info = 7;
+  repeated NetInfo net_info = 8;
+  repeated DiskInfo disk_info = 9;
+}
+
+service GrpcManager {
+  // 工作者推送监控数据给管理者
+  rpc SetMonitorInfo(MonitorInfo) returns (google.protobuf.Empty) {
+  }
+  
+  // 保留：管理者主动获取监控数据（可选）
+  rpc GetMonitorInfo(google.protobuf.Empty) returns (MonitorInfo) {
+  }
+}

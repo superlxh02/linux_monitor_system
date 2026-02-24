@@ -1,0 +1,24 @@
+syntax = "proto3";
+package monitor.proto;
+
+message DiskInfo {
+  string name = 1;
+  uint64 reads = 2;
+  uint64 writes = 3;
+  uint64 sectors_read = 4;
+  uint64 sectors_written = 5;
+  uint64 read_time_ms = 6;
+  uint64 write_time_ms = 7;
+  uint64 io_in_progress = 8;
+  uint64 io_time_ms = 9;
+  uint64 weighted_io_time_ms = 10;
+
+  // 速率/变化率字段
+  double read_bytes_per_sec = 20;
+  double write_bytes_per_sec = 21;
+  double read_iops = 22;
+  double write_iops = 23;
+  double avg_read_latency_ms = 24;
+  double avg_write_latency_ms = 25;
+  double util_percent = 26;
+}

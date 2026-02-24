@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cluster Monitor Dashboard</title>
+    
+    <!-- React & Babel -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <!-- Material UI -->
+    <link href="https://fonts.googleapis.com/css?family=Roboto:300,400,500,700&display=swap" rel="stylesheet" />
+    <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet" />
+    <script crossorigin src="https://unpkg.com/@mui/material@5.15.11/umd/material-ui.development.js"></script>
+    <script crossorigin src="https://unpkg.com/@emotion/react@11.11.3/umd/emotion-react.umd.min.js"></script>
+    <script crossorigin src="https://unpkg.com/@emotion/styled@11.11.0/umd/emotion-styled.umd.min.js"></script>
+
+    <!-- Prop-Types (Recharts peer dependency) -->
+    <script src="https://unpkg.com/prop-types/prop-types.min.js"></script>
+
+    <!-- Recharts (pinned version for stability) -->
+    <script src="https://unpkg.com/recharts@2.10.3/umd/Recharts.js"></script>
+
+    <!-- Socket.io -->
+    <script src="/socket.io/socket.io.js"></script>
+    
+    <!-- Axios -->
+    <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+
+    <style>
+        body { margin: 0; background-color: #0a1929; font-family: Roboto, sans-serif; overflow: hidden; }
+        #root { height: 100vh; display: flex; flex-direction: column; }
+        #error-display { padding: 20px; color: red; background: #fee; display: none; margin: 20px; border: 1px solid red; z-index: 9999; position: absolute; }
+        
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: #0a1929; }
+        ::-webkit-scrollbar-thumb { background: #334; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #556; }
+
+        /* Animations */
+        @keyframes pulse-green {
+            0% { box-shadow: 0 0 0 0 rgba(76, 175, 80, 0.4); }
+            70% { box-shadow: 0 0 0 10px rgba(76, 175, 80, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(76, 175, 80, 0); }
+        }
+        @keyframes pulse-red {
+            0% { box-shadow: 0 0 0 0 rgba(244, 67, 54, 0.4); }
+            70% { box-shadow: 0 0 0 10px rgba(244, 67, 54, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(244, 67, 54, 0); }
+        }
+    </style>
+</head>
+<body>
+    <div id="error-display"></div>
+    <div id="root">
+        <div style="height: 100vh; display: flex; align-items: center; justify-content: center; background: #0a1929; color: #90caf9;">
+            <div style="font-size: 24px;">🚀 系统初始化中 / System Initializing...</div>
+        </div>
+    </div>
+    
+    <script>
+        window.onerror = function(msg, url, lineNo, columnNo, error) {
+            var string = msg.toLowerCase();
+            var substring = "script error";
+            if (string.indexOf(substring) > -1){
+                alert('Script Error: See Browser Console for Detail');
+            } else {
+                var message = [
+                    'Message: ' + msg,
+                    'URL: ' + url,
+                    'Line: ' + lineNo,
+                    'Column: ' + columnNo,
+                    'Error object: ' + JSON.stringify(error)
+                ].join(' - ');
+                console.error(message);
+                var el = document.getElementById('error-display');
+                if(el) {
+                    el.style.display = 'block';
+                    el.innerText = "JavaScript Error:\n" + message;
+                }
+            }
+            return false;
+        };
+    </script>
+    <script type="text/babel" src="app.js"></script>
+</body>
+</html>

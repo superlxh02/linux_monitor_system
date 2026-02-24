@@ -1,0 +1,2 @@
+obj-m += softirq_collector.o
+obj-m += cpu_stat_collector.o

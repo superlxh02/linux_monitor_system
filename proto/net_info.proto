@@ -1,0 +1,16 @@
+syntax = "proto3";
+package monitor.proto;
+
+message NetInfo {
+    string name = 1;
+    float send_rate = 2;           // 发送速率，单位：kB/s
+    float rcv_rate = 3;            // 接收速率，单位：kB/s
+    float send_packets_rate = 4;   // 发送包数速率，单位：个/s
+    float rcv_packets_rate = 5;    // 接收包数速率，单位：个/s
+    
+    // 错误和丢弃统计
+    uint64 err_in = 6;             // 接收错误数
+    uint64 err_out = 7;            // 发送错误数
+    uint64 drop_in = 8;            // 接收丢弃数
+    uint64 drop_out = 9;           // 发送丢弃数
+}

@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.20)
+project(linux_monitor_system LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 23)
+include_directories(thirdparty)
+add_subdirectory(proto)
+add_subdirectory(worker)
+add_subdirectory(manager)
