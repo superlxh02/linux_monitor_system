@@ -308,26 +308,33 @@ std::string HostManager::get_best_host() {
 }
 
 
-double HostManager::calc_scores(const monitor::proto::MonitorInfo& info) {
-  // ============================================================
-  // 性能评分模型 - 针对学校选课/查成绩系统高并发场景优化
-  // ============================================================
-  // 权重配置：
-  // - CPU 使用率: 35%
-  // - 内存使用率: 30%
-  // - CPU 负载:   15%
-  // - 磁盘 IO:    15%
-  // - 网络带宽:    5% (收发各 2.5%)
-  // ============================================================
-  
-  const double cpu_weight = 0.35;
-  const double mem_weight = 0.30;
-  const double load_weight = 0.15;
-  const double disk_weight = 0.15;
-  const double net_weight = 0.05;
+double HostManager::calc_scores(const monitor::proto::MonitorInfo& info,
+                                ScoringProfile profile) {
+  struct Weights {
+    double cpu_weight;
+    double mem_weight;
+    double load_weight;
+    double disk_weight;
+    double net_weight;
+    double load_coefficient;
+    double max_bandwidth;
+  };
 
-  const double load_coefficient = 1.5;  // I/O 密集型场景系数
-  const double max_bandwidth = 125000000.0;  // 1Gbps
+  auto profile_weights = [](ScoringProfile p) -> Weights {
+    switch (p) {
+      case ScoringProfile::HIGH_CONCURRENCY:
+        return Weights{0.45, 0.25, 0.15, 0.10, 0.05, 1.2, 125000000.0};
+      case ScoringProfile::IO_INTENSIVE:
+        return Weights{0.20, 0.15, 0.20, 0.35, 0.10, 2.0, 125000000.0};
+      case ScoringProfile::MEMORY_SENSITIVE:
+        return Weights{0.20, 0.45, 0.15, 0.10, 0.10, 1.5, 125000000.0};
+      case ScoringProfile::BALANCED:
+      default:
+        return Weights{0.35, 0.30, 0.15, 0.15, 0.05, 1.5, 125000000.0};
+    }
+  };
+
+  const Weights w = profile_weights(profile);
 
   double cpu_percent = 0, load_avg_1 = 0, mem_percent = 0;
   double net_recv_rate = 0, net_send_rate = 0, disk_util = 0;
@@ -360,15 +367,15 @@ double HostManager::calc_scores(const monitor::proto::MonitorInfo& info) {
   
   double cpu_score = clamp(1.0 - cpu_percent / 100.0);
   double mem_score = clamp(1.0 - mem_percent / 100.0);
-  double load_score = clamp(1.0 - load_avg_1 / (cpu_cores * load_coefficient));
+  double load_score = clamp(1.0 - load_avg_1 / (cpu_cores * w.load_coefficient));
   double disk_score = clamp(1.0 - disk_util / 100.0);
-  double net_recv_score = clamp(1.0 - net_recv_rate / max_bandwidth);
-  double net_send_score = clamp(1.0 - net_send_rate / max_bandwidth);
+  double net_recv_score = clamp(1.0 - net_recv_rate / w.max_bandwidth);
+  double net_send_score = clamp(1.0 - net_send_rate / w.max_bandwidth);
   double net_score = (net_recv_score + net_send_score) / 2.0;
 
-  double score = cpu_score * cpu_weight + mem_score * mem_weight +
-                 load_score * load_weight + disk_score * disk_weight +
-                 net_score * net_weight;
+  double score = cpu_score * w.cpu_weight + mem_score * w.mem_weight +
+                 load_score * w.load_weight + disk_score * w.disk_weight +
+                 net_score * w.net_weight;
 
   score *= 100.0;
   return score < 0 ? 0 : (score > 100 ? 100 : score);
@@ -497,6 +504,31 @@ void HostManager::write_to_mysql(
         << mem_avail_rate << "," << disk_util_percent_rate << ","
         << net_in_rate_rate << "," << net_out_rate_rate
         << ",'" << time_buf << "')";
+    if (mysql_query(conn, oss.str().c_str()) != 0) {
+      log_mysql_error();
+    }
+  }
+
+  // ========== 2. 写入网络详细表 server_net_detail ==========
+  // ========== 1.1 写入 CPU 核心详细表 server_cpu_core_detail ==========
+  for (int i = 0; i < info.cpu_stat_size(); ++i) {
+    const auto& cpu = info.cpu_stat(i);
+    const std::string cpu_name = cpu.cpu_name();
+    if (cpu_name.empty() || cpu_name == "cpu") {
+      continue;
+    }
+
+    std::ostringstream oss;
+    oss << "INSERT INTO server_cpu_core_detail "
+        << "(server_name, cpu_name, cpu_percent, usr_percent, system_percent, "
+        << "nice_percent, idle_percent, io_wait_percent, irq_percent, soft_irq_percent, timestamp) VALUES ('"
+        << host_name << "','" << cpu_name << "',"
+        << cpu.cpu_percent() << "," << cpu.usr_percent() << ","
+        << cpu.system_percent() << "," << cpu.nice_percent() << ","
+        << cpu.idle_percent() << "," << cpu.io_wait_percent() << ","
+        << cpu.irq_percent() << "," << cpu.soft_irq_percent()
+        << ", '" << time_buf << "')";
+
     if (mysql_query(conn, oss.str().c_str()) != 0) {
       log_mysql_error();
     }

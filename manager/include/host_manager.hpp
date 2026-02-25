@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "scoring_profile.hpp"
 #include "monitor_info.pb.h"
 
 namespace monitor {
@@ -40,7 +41,8 @@ class HostManager {
 
  private:
   void process_for_loop();
-  double calc_scores(const monitor::proto::MonitorInfo& info);
+  double calc_scores(const monitor::proto::MonitorInfo& info,
+                     ScoringProfile profile = ScoringProfile::BALANCED);
   void write_to_mysql(const std::string& host_name, const HostScore& host_score,
                     double net_in_rate, double net_out_rate,
                     float cpu_percent_rate, float usr_percent_rate,

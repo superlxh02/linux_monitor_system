@@ -62,6 +62,23 @@ CREATE TABLE IF NOT EXISTS server_performance (
     INDEX idx_score(score)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- 1.1 CPU 核心详细数据表
+CREATE TABLE IF NOT EXISTS server_cpu_core_detail (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    server_name VARCHAR(255) NOT NULL,
+    cpu_name VARCHAR(64) NOT NULL,
+    cpu_percent FLOAT DEFAULT 0,
+    usr_percent FLOAT DEFAULT 0,
+    system_percent FLOAT DEFAULT 0,
+    nice_percent FLOAT DEFAULT 0,
+    idle_percent FLOAT DEFAULT 0,
+    io_wait_percent FLOAT DEFAULT 0,
+    irq_percent FLOAT DEFAULT 0,
+    soft_irq_percent FLOAT DEFAULT 0,
+    timestamp DATETIME NOT NULL,
+    INDEX idx_server_cpu_core_time(server_name, cpu_name, timestamp)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 -- 2. 网络详细数据表
 CREATE TABLE IF NOT EXISTS server_net_detail (
     id INT AUTO_INCREMENT PRIMARY KEY,

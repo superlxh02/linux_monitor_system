@@ -9,7 +9,10 @@
 #include "monitor_info.pb.h"
 
 
+
 namespace monitor{
+    //这是manager端的服务实现类，负责处理worker推送过来的监控数据。
+    //注意不是worker端的server实现类
     class GrpcManagerImpl : public monitor::proto::GrpcManager::Service{
         public:
             GrpcManagerImpl();

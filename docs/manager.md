@@ -17,7 +17,7 @@
 | **HostScore** | 主机标识 + `MonitorInfo` + 健康评分 + 时间戳。 |
 | **HostData** | `MonitorInfo` + 接收时间戳，用于 GrpcServerImpl 内存缓存。 |
 | **PerformanceRecord / AnomalyRecord / ServerScoreSummary / ClusterStats** | 查询结果与统计的结构化表示。 |
-| **TimeRange / AnomalyThresholds / SortOrder / ServerStatus** | 查询参数与配置。 |
+| **TimeRange / AnomalyThresholds / SortOrder / ServerStatus / ScoringProfile** | 查询参数与配置（含评分场景）。 |
 
 ---
 
@@ -30,7 +30,7 @@
   2. 回调将数据交给 **HostManager::on_data_received**：计算评分、写入 MySQL 多张表、更新内存中的 `_host_scores`；
   3. 外部或前端通过 **QueryService** 的 gRPC 接口发起查询，**QueryServiceImpl** 转调 **QueryManager** 的 MySQL 查询，返回 protobuf。
 - **MySQL**：HostManager 负责**写入**（性能、异常、详情等表）；QueryManager 持有连接并负责**所有读**（分页、时间范围、聚合、排序等）。
-- **健康评分**：在 HostManager 内对每份收到的 `MonitorInfo` 做一次加权评分，用于选优与历史记录。
+- **健康评分**：在 HostManager 内对每份收到的 `MonitorInfo` 计算默认评分（`BALANCED`）用于写库；查询阶段可按 `ScoringProfile` 动态重算并返回不同场景评分。
 
 ---
 
@@ -159,8 +159,11 @@ Worker 侧对应逻辑：**MonitorPusher** 周期调用 `_stub->SetMonitorInfo(&
 
 - 持有 `QueryManager* _query_manager`，不持有 MySQL 连接。
 - 将 protobuf 的 `TimeRange`、分页等转为 C++ 的 `TimeRange`、`page`、`page_size`；
+- 解析请求中的 `scoring_profile`（若未传则默认 `BALANCED`）；
 - 调用 QueryManager 的对应方法（如 `query_performance`、`query_trend`、`query_anomaly`、`query_score_rank`、`query_latest_score`、各类 `query_*_detail`）；
 - 将返回的 `PerformanceRecord`、`ServerScoreSummary` 等转为 protobuf 并写回 response。
+
+评分相关接口（`QueryPerformance`、`QueryTrend`、`QueryScoreRank`、`QueryLatestScore`）均支持按场景返回分数。
 
 #### 4.2.2 示例：QueryPerformance
 
@@ -178,8 +181,10 @@ Worker 侧对应逻辑：**MonitorPusher** 周期调用 `_stub->SetMonitorInfo(&
   int page = request->pagination().page();
   int page_size = request->pagination().page_size();
   int total_count = 0;
-  auto records = _query_manager->query_performance(
-      request->server_name(), time_range, page, page_size, &total_count);
+    auto scoring_profile = convert_scoring_profile(request->scoring_profile());
+    auto records = _query_manager->query_performance(
+      request->server_name(), time_range, page, page_size, &total_count,
+      scoring_profile);
 
   for (const auto& rec : records) {
     auto* proto_rec = response->add_records();
@@ -191,6 +196,7 @@ Worker 侧对应逻辑：**MonitorPusher** 周期调用 `_stub->SetMonitorInfo(&
   response->set_total_count(total_count);
   response->set_page(page);
   response->set_page_size(page_size);
+  response->set_scoring_profile(request->scoring_profile());
   return grpc::Status::OK;
 }
 ```
@@ -239,29 +245,32 @@ bool QueryManager::init(const std::string& host, const std::string& user,
 
 ---
 
-### 4.4 健康评分算法
+### 4.4 健康评分算法（多场景）
 
 #### 4.4.1 调用位置
 
 在 **HostManager::on_data_received** 中，对每份收到的 `MonitorInfo` 调用：
 
 ```cpp
-double score = calc_scores(info);
+double score = calc_scores(info, ScoringProfile::BALANCED);
 ```
 
 结果用于：写入内存 `_host_scores`、写入 MySQL、以及通过 `get_best_host()` 做负载均衡选优。
 
+查询阶段（`QueryManager`）会根据请求中的 `ScoringProfile` 对查询结果进行**动态重算分数**，以满足不同业务场景。
+
 #### 4.4.2 算法是什么（calc_scores 源码逻辑）
 
-设计目标：**针对学校选课/查成绩等高并发场景**，把 CPU、内存、负载、磁盘、网络综合成一个 0～100 的“健康分”，分数越高表示机器越适合承接新请求。
+设计目标：提供可切换的评分体系，使同一份原始监控数据在不同业务假设下得到更合理的排序结果（例如高并发、I/O 密集、内存敏感）。
 
-**权重配置**（源码注释与常量）：
+**评分体系与权重**（`ScoringProfile`）：
 
-- CPU 使用率：**35%**
-- 内存使用率：**30%**
-- CPU 负载（1 分钟）：**15%**
-- 磁盘 IO 利用率：**15%**
-- 网络带宽：**5%**（收、发各占一半）
+| 评分体系 | CPU | 内存 | 负载 | 磁盘 | 网络 | 负载系数 N |
+|---|---:|---:|---:|---:|---:|---:|
+| `BALANCED` | 0.35 | 0.30 | 0.15 | 0.15 | 0.05 | 1.5 |
+| `HIGH_CONCURRENCY` | 0.45 | 0.25 | 0.15 | 0.10 | 0.05 | 1.2 |
+| `IO_INTENSIVE` | 0.20 | 0.15 | 0.20 | 0.35 | 0.10 | 2.0 |
+| `MEMORY_SENSITIVE` | 0.20 | 0.45 | 0.15 | 0.10 | 0.10 | 1.5 |
 
 **步骤简述**：
 
@@ -270,18 +279,17 @@ double score = calc_scores(info);
 
 2. **单项得分（反向归一化）**  
    - 使用率类（CPU、内存、磁盘）：越高越差，故 `score = 1 - value/100`，并 clamp 到 [0,1]。  
-   - 负载：`load_score = 1 - load_avg_1 / (cpu_cores * load_coefficient)`，其中 `load_coefficient = 1.5`（兼顾 I/O 密集型场景），再 clamp。  
-   - 网络：以 1Gbps（125000000 B/s）为参考，`net_*_score = 1 - rate / max_bandwidth`，收发各算一个再取平均得到 `net_score`。
+  - 负载：`load_score = 1 - load_avg_1 / (cpu_cores * N)`，`N` 由评分体系决定。  
+  - 网络：以 1Gbps（125000000 B/s）为参考，`net_*_score = 1 - rate / max_bandwidth`，收发各算一个再取平均得到 `net_score`。
 
 3. **加权总分**  
-   `score = cpu_score*0.35 + mem_score*0.30 + load_score*0.15 + disk_score*0.15 + net_score*0.05`，再乘以 100，并限制在 [0, 100]。
+  `score = cpu_score*w_cpu + mem_score*w_mem + load_score*w_load + disk_score*w_disk + net_score*w_net`，再乘以 100，并限制在 [0, 100]。
 
 #### 4.4.3 为什么要这样设计
 
-- **权重偏向 CPU/内存**：选课、查成绩多为计算与内存访问密集，所以 CPU 35%、内存 30%，两者主导评分。
-- **负载单独 15%**：负载高代表排队任务多，即使 CPU 使用率未满也预示压力大；用 `cpu_cores * 1.5` 做归一化，避免多核机器负载略高就被打低分。
-- **磁盘 15%**：高并发下数据库与日志 IO 常见，磁盘忙会拖慢整体响应，故单独一项并给一定权重。
-- **网络 5%**：在典型内网选课场景中，单机带宽通常不是首要把瓶颈，因此权重较低，仅作参考。
+- **按业务切换权重**：不同工作负载关注点不同，支持多套权重避免“一套分数走天下”。
+- **写入与查询解耦**：写库阶段保留默认 `BALANCED` 分数，查询阶段可按请求动态重算并排序，不破坏历史数据结构。
+- **兼容旧调用**：未传 `scoring_profile` 时默认 `BALANCED`，旧客户端无需改动即可继续使用。
 - **反向归一化**：所有指标都转为“越空闲越好”的 0～1 分，再线性加权，保证分数直观（高=健康、低=繁忙），便于排序和阈值告警。
 
-这样，Manager 既能用 **calc_scores** 做实时选优（get_best_host），又能把评分和历史指标一起写入 MySQL，供 QueryManager 做趋势与异常分析。
+这样，Manager 既能用 **calc_scores** 做实时选优（get_best_host），又能在 QueryService 中按 `ScoringProfile` 输出“面向不同业务场景”的评分结果。

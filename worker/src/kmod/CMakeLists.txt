@@ -145,19 +145,4 @@ add_custom_target(kmod_log
   COMMENT "Showing recent kernel logs"
 )
 
-find_program(GCC_EXECUTABLE NAMES gcc cc)
-if(GCC_EXECUTABLE)
-  add_custom_target(kmod_test_cpu_stat
-    COMMAND "${GCC_EXECUTABLE}" -o "${KMOD_DIR}/test_cpu_stat" "${KMOD_DIR}/test_cpu_stat.c"
-    WORKING_DIRECTORY "${KMOD_DIR}"
-    COMMENT "Building test_cpu_stat userspace tester"
-  )
 
-  add_custom_target(kmod_test_softirq
-    COMMAND "${GCC_EXECUTABLE}" -o "${KMOD_DIR}/test_softirq" "${KMOD_DIR}/test_softirq.c"
-    WORKING_DIRECTORY "${KMOD_DIR}"
-    COMMENT "Building test_softirq userspace tester"
-  )
-else()
-  message(WARNING "gcc/cc not found, skip kmod test program build targets")
-endif()

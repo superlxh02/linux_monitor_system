@@ -8,7 +8,7 @@ const {
 } = MaterialUI;
 
 const {
-    LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, AreaChart, Area
+    LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, AreaChart, Area, ReferenceLine
 } = Recharts;
 
 // --- Theme ---
@@ -88,12 +88,146 @@ const UNIT_MAP = {
     rcu: "次"
 };
 
+const FIELD_LABEL_MAP = {
+    server_name: "节点名称",
+    timestamp: "采集时间",
+    score: "综合评分",
+    status: "在线状态",
+    cpu_percent: "CPU总使用率",
+    usr_percent: "用户态占比",
+    system_percent: "内核态占比",
+    nice_percent: "Nice占比",
+    idle_percent: "空闲占比",
+    io_wait_percent: "IO等待占比",
+    irq_percent: "硬中断占比",
+    soft_irq_percent: "软中断占比",
+    load_avg_1: "1分钟负载",
+    load_avg_3: "3分钟负载",
+    load_avg_15: "15分钟负载",
+    mem_used_percent: "内存使用率",
+    mem_total: "总内存",
+    mem_free: "空闲内存",
+    mem_avail: "可用内存",
+    disk_util_percent: "磁盘利用率",
+    send_rate: "发送速率",
+    rcv_rate: "接收速率",
+    cpu_percent_rate: "CPU变化率",
+    mem_used_percent_rate: "内存变化率",
+    disk_util_percent_rate: "磁盘变化率",
+    load_avg_1_rate: "负载变化率",
+    send_rate_rate: "发送速率变化",
+    rcv_rate_rate: "接收速率变化",
+    anomaly_type: "异常类型",
+    severity: "严重级别",
+    value: "异常值",
+    threshold: "阈值",
+    metric_name: "异常指标",
+    net_name: "网卡",
+    err_in: "接收错误数",
+    err_out: "发送错误数",
+    drop_in: "接收丢包数",
+    drop_out: "发送丢包数",
+    rcv_bytes_rate: "接收字节速率",
+    snd_bytes_rate: "发送字节速率",
+    rcv_packets_rate: "接收包速率",
+    snd_packets_rate: "发送包速率",
+    disk_name: "磁盘设备",
+    read_bytes_per_sec: "读吞吐",
+    write_bytes_per_sec: "写吞吐",
+    read_iops: "读IOPS",
+    write_iops: "写IOPS",
+    avg_read_latency_ms: "平均读时延",
+    avg_write_latency_ms: "平均写时延",
+    total: "总内存",
+    free: "空闲内存",
+    avail: "可用内存",
+    buffers: "Buffers",
+    cached: "缓存",
+    active: "活跃内存",
+    inactive: "非活跃内存",
+    dirty: "脏页",
+    cpu_name: "CPU核心",
+    hi: "HI软中断",
+    timer: "TIMER软中断",
+    net_tx: "NET_TX软中断",
+    net_rx: "NET_RX软中断",
+    block: "BLOCK软中断",
+    sched: "SCHED软中断"
+};
+
 const getUnitByField = (field) => UNIT_MAP[field] || "";
+const getFieldLabel = (field) => FIELD_LABEL_MAP[field] || field;
 
 const getMetricUnitByDataKey = (dataKey = "") => {
     if (dataKey.endsWith("_cpu") || dataKey.endsWith("_mem") || dataKey.endsWith("_disk")) return "%";
     if (dataKey.endsWith("_net")) return "MB/s";
     return "";
+};
+
+const SCORING_PROFILES = [
+    { value: "BALANCED", label: "通用均衡" },
+    { value: "HIGH_CONCURRENCY", label: "高并发" },
+    { value: "IO_INTENSIVE", label: "IO密集" },
+    { value: "MEMORY_SENSITIVE", label: "内存敏感" }
+];
+
+const getScoringWeights = (profile) => {
+    switch (profile) {
+        case "HIGH_CONCURRENCY":
+            return { cpu: 0.45, mem: 0.25, load: 0.15, disk: 0.10, net: 0.05, loadCoef: 1.2, maxBandwidth: 125000000 };
+        case "IO_INTENSIVE":
+            return { cpu: 0.20, mem: 0.15, load: 0.20, disk: 0.35, net: 0.10, loadCoef: 2.0, maxBandwidth: 125000000 };
+        case "MEMORY_SENSITIVE":
+            return { cpu: 0.20, mem: 0.45, load: 0.15, disk: 0.10, net: 0.10, loadCoef: 1.5, maxBandwidth: 125000000 };
+        case "BALANCED":
+        default:
+            return { cpu: 0.35, mem: 0.30, load: 0.15, disk: 0.15, net: 0.05, loadCoef: 1.5, maxBandwidth: 125000000 };
+    }
+};
+
+const clamp01 = (v) => Math.max(0, Math.min(1, v));
+
+const calculateScenarioScore = (server, profile) => {
+    const w = getScoringWeights(profile);
+    const cpu = Number(server.cpu_percent) || 0;
+    const mem = Number(server.mem_used_percent) || 0;
+    const load = Number(server.load_avg_1) || 0;
+    const disk = Number(server.disk_util_percent) || 0;
+    const sendBytes = (Number(server.send_rate) || 0) * 1024;
+    const recvBytes = (Number(server.rcv_rate) || 0) * 1024;
+
+    const cpuScore = clamp01(1 - cpu / 100);
+    const memScore = clamp01(1 - mem / 100);
+    const loadScore = clamp01(1 - load / (4 * w.loadCoef));
+    const diskScore = clamp01(1 - disk / 100);
+    const recvScore = clamp01(1 - recvBytes / w.maxBandwidth);
+    const sendScore = clamp01(1 - sendBytes / w.maxBandwidth);
+    const netScore = (recvScore + sendScore) / 2;
+
+    const score = 100 * (cpuScore * w.cpu + memScore * w.mem + loadScore * w.load + diskScore * w.disk + netScore * w.net);
+    return Math.max(0, Math.min(100, score));
+};
+
+const applyScoringProfileToOverview = (overviewData, profile) => {
+    const servers = (overviewData?.servers || []).map((s) => ({ ...s, score: calculateScenarioScore(s, profile) }));
+    const sortedByScore = [...servers].sort((a, b) => (b.score || 0) - (a.score || 0));
+    const total = servers.length;
+    const online = servers.filter((s) => s.status === "0" || s.status === "ONLINE" || s.status === 0).length;
+    const sum = servers.reduce((acc, s) => acc + (Number(s.score) || 0), 0);
+    const max = sortedByScore[0]?.score || 0;
+    const min = sortedByScore[sortedByScore.length - 1]?.score || 0;
+    const cluster_stats = {
+        ...(overviewData?.cluster_stats || {}),
+        total_servers: total,
+        online_servers: online,
+        offline_servers: Math.max(0, total - online),
+        avg_score: total > 0 ? sum / total : 0,
+        max_score: max,
+        min_score: min,
+        best_server: sortedByScore[0]?.server_name || "",
+        worst_server: sortedByScore[sortedByScore.length - 1]?.server_name || ""
+    };
+    return { ...overviewData, servers, cluster_stats, scoring_profile: profile };
 };
 
 // --- Dashboard Components ---
@@ -449,7 +583,7 @@ const QueryTableView = ({ title, subtitle, rows, loading, error, emptyText }) =>
                             <TableRow>
                                 <TableCell>#</TableCell>
                                 {columns.map((c) => (
-                                    <TableCell key={c}>{getUnitByField(c) ? `${c} (${getUnitByField(c)})` : c}</TableCell>
+                                    <TableCell key={c}>{getUnitByField(c) ? `${getFieldLabel(c)} (${getUnitByField(c)})` : getFieldLabel(c)}</TableCell>
                                 ))}
                             </TableRow>
                         </TableHead>
@@ -476,6 +610,8 @@ const QueryControlBar = ({
     servers,
     selectedServer,
     onServerChange,
+    scoringProfile,
+    onScoringProfileChange,
     hours,
     onHoursChange,
     intervalSeconds,
@@ -496,6 +632,18 @@ const QueryControlBar = ({
         >
             {servers.map((s) => (
                 <MenuItem key={s.server_name} value={s.server_name}>{s.server_name}</MenuItem>
+            ))}
+        </Select>
+
+        <Typography variant="body2" color="text.secondary">评分体系</Typography>
+        <Select
+            size="small"
+            value={scoringProfile}
+            onChange={(e) => onScoringProfileChange(e.target.value)}
+            sx={{ minWidth: 180 }}
+        >
+            {SCORING_PROFILES.map((p) => (
+                <MenuItem key={p.value} value={p.value}>{p.label}</MenuItem>
             ))}
         </Select>
 
@@ -564,6 +712,373 @@ const QueryControlBar = ({
     </Paper>
 );
 
+const formatTsLabel = (timestamp) => {
+    if (!timestamp || typeof timestamp !== "object") return "-";
+    const seconds = Number(timestamp.seconds || 0);
+    if (!Number.isFinite(seconds) || seconds <= 0) return "-";
+    return new Date(seconds * 1000).toLocaleString("zh-CN", { hour12: false });
+};
+
+const aggregateFlowRows = (records, mode) => {
+    const map = new Map();
+    records.forEach((row) => {
+        const ts = Number(row?.timestamp?.seconds || 0);
+        if (!ts) return;
+        const key = String(ts);
+        const prev = map.get(key) || { ts, input: 0, output: 0 };
+        if (mode === "net") {
+            prev.input += Number(row.rcv_bytes_rate || 0);
+            prev.output += Number(row.snd_bytes_rate || 0);
+        } else {
+            prev.input += Number(row.read_bytes_per_sec || 0);
+            prev.output += Number(row.write_bytes_per_sec || 0);
+        }
+        map.set(key, prev);
+    });
+
+    return [...map.values()]
+        .sort((a, b) => a.ts - b.ts)
+        .map((r) => {
+            const inputMB = r.input / 1024 / 1024;
+            const outputMB = r.output / 1024 / 1024;
+            return {
+                time: new Date(r.ts * 1000).toLocaleTimeString("zh-CN", { hour12: false }),
+                timestampLabel: new Date(r.ts * 1000).toLocaleString("zh-CN", { hour12: false }),
+                input: inputMB,
+                output: outputMB,
+                total: inputMB + outputMB
+            };
+        });
+};
+
+const percentile = (values, p) => {
+    if (!values || values.length === 0) return 0;
+    const sorted = [...values].sort((a, b) => a - b);
+    const idx = Math.min(sorted.length - 1, Math.max(0, Math.floor((sorted.length - 1) * p)));
+    return Number(sorted[idx] || 0);
+};
+
+const FlowTripleMonitorView = ({
+    mode,
+    selectedServer,
+    rows,
+    loading,
+    error
+}) => {
+    const [alertsOnly, setAlertsOnly] = React.useState(false);
+    const aggregated = React.useMemo(() => aggregateFlowRows(rows || [], mode), [rows, mode]);
+
+    const thresholds = React.useMemo(() => {
+        const build = (key) => {
+            const vals = aggregated.map((r) => Number(r[key] || 0));
+            return {
+                warn: percentile(vals, 0.90),
+                critical: percentile(vals, 0.98)
+            };
+        };
+        return {
+            input: build("input"),
+            output: build("output"),
+            total: build("total")
+        };
+    }, [aggregated]);
+
+    const title = mode === "net" ? "🌐 网络流量监控详情" : "💿 磁盘IO监控详情";
+    const subtitle = mode === "net"
+        ? "展示输入流量、输出流量、总流量（聚合所有网卡）"
+        : "展示读流量、写流量、总流量（聚合所有磁盘）";
+
+    const sections = [
+        { key: "input", title: mode === "net" ? "输入流量趋势" : "读流量趋势", color: "#2196f3" },
+        { key: "output", title: mode === "net" ? "输出流量趋势" : "写流量趋势", color: "#f50057" },
+        { key: "total", title: "总流量趋势", color: "#00e676" }
+    ];
+
+    const getSeverity = React.useCallback((sectionKey, value) => {
+        const t = thresholds[sectionKey] || { warn: 0, critical: 0 };
+        if (value >= t.critical && t.critical > 0) return "critical";
+        if (value >= t.warn && t.warn > 0) return "warning";
+        return "normal";
+    }, [thresholds]);
+
+    return (
+        <Box sx={{ p: 4, height: "100%", overflowY: "auto" }}>
+            <Box display="flex" justifyContent="space-between" alignItems="center" mb={1}>
+                <Typography variant="h4" fontWeight="bold">{title}</Typography>
+                <FormControlLabel
+                    control={<Checkbox checked={alertsOnly} onChange={(e) => setAlertsOnly(e.target.checked)} size="small" />}
+                    label="仅看告警"
+                />
+            </Box>
+            <Typography variant="body2" color="text.secondary" mb={2}>{selectedServer || "-"} ｜ {subtitle}</Typography>
+
+            {loading ? <LinearProgress sx={{ mb: 2 }} /> : null}
+            {error ? <Typography color="error" mb={2}>{error}</Typography> : null}
+
+            {!loading && aggregated.length === 0 ? (
+                <Paper sx={{ p: 3 }}>
+                    <Typography color="text.secondary">当前时间窗口暂无可展示的流量数据</Typography>
+                </Paper>
+            ) : (
+                <Box sx={{ display: "grid", gap: 3 }}>
+                    {sections.map((section) => (
+                        <Card key={section.key} sx={{ p: 2 }}>
+                            {(() => {
+                                const latestRows = [...aggregated].reverse().slice(0, 20);
+                                const criticalCount = latestRows.filter((r) => getSeverity(section.key, Number(r[section.key] || 0)) === "critical").length;
+                                const warningCount = latestRows.filter((r) => getSeverity(section.key, Number(r[section.key] || 0)) === "warning").length;
+                                return (
+                            <Box display="flex" justifyContent="space-between" alignItems="center" mb={1.5}>
+                                <Typography variant="h6">{section.title} (MB/s)</Typography>
+                                <Box display="flex" gap={1}>
+                                    <Chip size="small" color="error" variant="outlined" label={`严重: ${criticalCount}`} />
+                                    <Chip size="small" color="warning" variant="outlined" label={`预警: ${warningCount}`} />
+                                    <Chip size="small" color="warning" label={`P90: ${thresholds[section.key].warn.toFixed(3)}`} />
+                                    <Chip size="small" color="error" label={`P98: ${thresholds[section.key].critical.toFixed(3)}`} />
+                                </Box>
+                            </Box>
+                                );
+                            })()}
+                            <Box sx={{ height: 260, mb: 2 }}>
+                                <ResponsiveContainer width="100%" height="100%">
+                                    <LineChart data={aggregated}>
+                                        <CartesianGrid strokeDasharray="3 3" stroke="#2c3e50" />
+                                        <XAxis dataKey="time" stroke="#546e7a" />
+                                        <YAxis stroke="#546e7a" />
+                                        <Tooltip formatter={(v) => [`${Number(v || 0).toFixed(3)} MB/s`, section.title]} contentStyle={{ backgroundColor: "rgba(20, 30, 40, 0.9)", border: "1px solid #333" }} />
+                                        <Legend />
+                                        <ReferenceLine y={thresholds[section.key].warn} stroke="#ffea00" strokeDasharray="5 5" label={{ value: "P90", position: "right", fill: "#ffea00" }} />
+                                        <ReferenceLine y={thresholds[section.key].critical} stroke="#ff1744" strokeDasharray="5 5" label={{ value: "P98", position: "right", fill: "#ff1744" }} />
+                                        <Line type="monotone" dataKey={section.key} stroke={section.color} dot={false} strokeWidth={2} name={section.title} />
+                                    </LineChart>
+                                </ResponsiveContainer>
+                            </Box>
+
+                            <TableContainer component={Paper}>
+                                <Table size="small">
+                                    <TableHead sx={{ bgcolor: "background.default" }}>
+                                        <TableRow>
+                                            <TableCell>#</TableCell>
+                                            <TableCell>时间</TableCell>
+                                            <TableCell align="right">{section.title} (MB/s)</TableCell>
+                                        </TableRow>
+                                    </TableHead>
+                                    <TableBody>
+                                        {[...aggregated].reverse().slice(0, 20).filter((row) => {
+                                            if (!alertsOnly) return true;
+                                            const value = Number(row[section.key] || 0);
+                                            return getSeverity(section.key, value) !== "normal";
+                                        }).map((row, idx) => {
+                                            const value = Number(row[section.key] || 0);
+                                            const severity = getSeverity(section.key, value);
+                                            const isCritical = severity === "critical";
+                                            const isWarning = severity === "warning";
+                                            return (
+                                            <TableRow
+                                                key={`${section.key}_${row.timestampLabel}_${idx}`}
+                                                hover
+                                                sx={isCritical
+                                                    ? { backgroundColor: "rgba(255, 23, 68, 0.12)" }
+                                                    : isWarning
+                                                        ? { backgroundColor: "rgba(255, 234, 0, 0.10)" }
+                                                        : undefined}
+                                            >
+                                                <TableCell>{idx + 1}</TableCell>
+                                                <TableCell>{row.timestampLabel}</TableCell>
+                                                <TableCell align="right" sx={{ fontFamily: "monospace", color: isCritical ? "error.main" : (isWarning ? "warning.main" : "text.primary") }}>
+                                                    {value.toFixed(3)}
+                                                </TableCell>
+                                            </TableRow>
+                                        )})}
+                                    </TableBody>
+                                </Table>
+                            </TableContainer>
+                        </Card>
+                    ))}
+                </Box>
+            )}
+        </Box>
+    );
+};
+
+const CpuCoreBarsView = ({
+    servers,
+    selectedServer,
+    onServerChange,
+    scoringProfile,
+    onScoringProfileChange,
+    hours,
+    onHoursChange,
+    onRefresh,
+    cpuCoreRows,
+    cpuCoreLoading,
+    cpuCoreError,
+    nodeHistories
+}) => {
+    const formatCpuLabel = React.useCallback((cpuName = "") => {
+        const text = String(cpuName).trim().toLowerCase();
+        const match = text.match(/^cpu(\d+)$/);
+        if (match) {
+            return `CPU ${match[1]}`;
+        }
+        if (text === "cpu") {
+            return "CPU总览";
+        }
+        return String(cpuName).toUpperCase();
+    }, []);
+
+    const selectedServerInfo = React.useMemo(
+        () => servers.find((s) => s.server_name === selectedServer) || null,
+        [servers, selectedServer]
+    );
+
+    const coreRows = React.useMemo(() => {
+        const rows = (cpuCoreRows || []).filter((r) => r.server_name === selectedServer);
+        const cpuOrder = (name = "") => {
+            const match = name.match(/^cpu(\d+)$/i);
+            if (!match) return Number.MAX_SAFE_INTEGER;
+            return Number(match[1]);
+        };
+        return rows.sort((a, b) => {
+            const da = cpuOrder(a.cpu_name);
+            const db = cpuOrder(b.cpu_name);
+            if (da !== db) return da - db;
+            return String(a.cpu_name).localeCompare(String(b.cpu_name));
+        });
+    }, [cpuCoreRows, selectedServer]);
+
+    const historyData = React.useMemo(() => {
+        const history = nodeHistories[selectedServer] || [];
+        return history.map((p) => ({ time: p.time, cpu: p.cpu }));
+    }, [nodeHistories, selectedServer]);
+
+    return (
+        <Box sx={{ p: 4, height: "100%", overflowY: "auto" }}>
+            <Typography variant="h4" fontWeight="bold" mb={1}>⚡ CPU 负载监控详情</Typography>
+            <Typography variant="body2" color="text.secondary" mb={2}>
+                上方展示每个 CPU 核心当前负载（柱状），下方展示节点总 CPU 负载曲线
+            </Typography>
+
+            <QueryControlBar
+                servers={servers}
+                selectedServer={selectedServer}
+                onServerChange={onServerChange}
+                scoringProfile={scoringProfile}
+                onScoringProfileChange={onScoringProfileChange}
+                hours={hours}
+                onHoursChange={onHoursChange}
+                intervalSeconds={300}
+                onIntervalChange={() => {}}
+                showInterval={false}
+                showAnomalyThresholds={false}
+                anomalyThresholds={{}}
+                onAnomalyThresholdChange={() => {}}
+                onRefresh={onRefresh}
+            />
+
+            <Card sx={{ p: 3, mb: 3 }}>
+                <Box display="flex" justifyContent="space-between" alignItems="center" mb={2}>
+                    <Typography variant="h6">{selectedServer || "-"} 核心负载</Typography>
+                    <Chip
+                        size="small"
+                        color="primary"
+                        label={`总CPU: ${selectedServerInfo ? selectedServerInfo.cpu_percent.toFixed(1) : "0.0"}%`}
+                    />
+                </Box>
+
+                {cpuCoreLoading && coreRows.length === 0 ? <LinearProgress sx={{ mb: 2 }} /> : null}
+                {cpuCoreError ? <Typography color="error" mb={2}>{cpuCoreError}</Typography> : null}
+
+                {!cpuCoreLoading && coreRows.length === 0 ? (
+                    <Typography color="text.secondary">当前节点在该时间窗口没有 CPU 核心明细数据</Typography>
+                ) : (
+                    <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", md: "1fr 1fr" }, gap: 1.5 }}>
+                        {coreRows.map((row, idx) => {
+                            const percent = Math.max(0, Math.min(100, Number(row.cpu_percent) || 0));
+                            const color = percent > 80 ? "error" : percent > 50 ? "warning" : "success";
+                            return (
+                                <Box key={`${row.server_name}_${row.cpu_name}_${idx}`} sx={{ display: "flex", alignItems: "center", gap: 1.5 }}>
+                                    <Typography sx={{ width: 52, fontFamily: "monospace", color: "text.secondary" }}>
+                                        {formatCpuLabel(row.cpu_name)}
+                                    </Typography>
+                                    <Box sx={{ flexGrow: 1 }}>
+                                        <LinearProgress
+                                            variant="determinate"
+                                            value={percent}
+                                            color={color}
+                                            sx={{ height: 10, borderRadius: 5 }}
+                                        />
+                                    </Box>
+                                    <Typography sx={{ width: 56, textAlign: "right", fontFamily: "monospace", color: "primary.main" }}>
+                                        {percent.toFixed(1)}%
+                                    </Typography>
+                                </Box>
+                            );
+                        })}
+                    </Box>
+                )}
+            </Card>
+
+            <Card sx={{ p: 3, mb: 3 }}>
+                <Typography variant="h6" mb={1.5}>每核关键指标矩阵（性能分析重点）</Typography>
+                <Typography variant="body2" color="text.secondary" mb={2}>
+                    每个核心展示总使用率、用户态、内核态、IO等待、软中断、空闲占比，便于快速定位瓶颈类型。
+                </Typography>
+
+                {cpuCoreLoading && coreRows.length === 0 ? <LinearProgress sx={{ mb: 2 }} /> : null}
+                {!cpuCoreLoading && coreRows.length === 0 ? (
+                    <Typography color="text.secondary">当前没有可用的核心状态数据</Typography>
+                ) : (
+                    <TableContainer component={Paper}>
+                        <Table size="small">
+                            <TableHead sx={{ bgcolor: "background.default" }}>
+                                <TableRow>
+                                    <TableCell>CPU核心</TableCell>
+                                    <TableCell align="right">总使用率(%)</TableCell>
+                                    <TableCell align="right">用户态(%)</TableCell>
+                                    <TableCell align="right">内核态(%)</TableCell>
+                                    <TableCell align="right">IO等待(%)</TableCell>
+                                    <TableCell align="right">软中断(%)</TableCell>
+                                    <TableCell align="right">空闲(%)</TableCell>
+                                </TableRow>
+                            </TableHead>
+                            <TableBody>
+                                {coreRows.map((row, idx) => (
+                                    <TableRow key={`${row.server_name}_${row.cpu_name}_metric_${idx}`} hover>
+                                        <TableCell sx={{ fontFamily: "monospace" }}>{formatCpuLabel(row.cpu_name)}</TableCell>
+                                        <TableCell align="right" sx={{ color: "primary.main", fontFamily: "monospace" }}>{Number(row.cpu_percent || 0).toFixed(1)}</TableCell>
+                                        <TableCell align="right" sx={{ fontFamily: "monospace" }}>{Number(row.usr_percent || 0).toFixed(1)}</TableCell>
+                                        <TableCell align="right" sx={{ fontFamily: "monospace" }}>{Number(row.system_percent || 0).toFixed(1)}</TableCell>
+                                        <TableCell align="right" sx={{ fontFamily: "monospace" }}>{Number(row.io_wait_percent || 0).toFixed(1)}</TableCell>
+                                        <TableCell align="right" sx={{ fontFamily: "monospace" }}>{Number(row.soft_irq_percent || 0).toFixed(1)}</TableCell>
+                                        <TableCell align="right" sx={{ color: "success.main", fontFamily: "monospace" }}>{Number(row.idle_percent || 0).toFixed(1)}</TableCell>
+                                    </TableRow>
+                                ))}
+                            </TableBody>
+                        </Table>
+                    </TableContainer>
+                )}
+            </Card>
+
+            <Card sx={{ p: 2 }}>
+                <Typography variant="h6" mb={1.5}>总CPU负载曲线</Typography>
+                <Box sx={{ height: 320 }}>
+                    <ResponsiveContainer width="100%" height="100%">
+                        <AreaChart data={historyData}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#2c3e50" />
+                            <XAxis dataKey="time" stroke="#546e7a" />
+                            <YAxis stroke="#546e7a" domain={[0, 100]} />
+                            <Tooltip formatter={(v) => [`${Number(v || 0).toFixed(2)} %`, "CPU"]} contentStyle={{ backgroundColor: "rgba(20, 30, 40, 0.9)", border: "1px solid #333" }} />
+                            <Legend />
+                            <Area type="monotone" dataKey="cpu" name={`${selectedServer || "节点"} 总CPU(%)`} stroke="#2196f3" fill="#2196f3" fillOpacity={0.25} />
+                        </AreaChart>
+                    </ResponsiveContainer>
+                </Box>
+            </Card>
+        </Box>
+    );
+};
+
 const EndpointView = ({ endpointData }) => {
     const endpoints = endpointData?.endpoints || [];
 
@@ -618,6 +1133,7 @@ const AppShell = () => {
     const [subViewNode, setSubViewNode] = React.useState(null); // If set, shows chart for this node inside the current view
     
     const [data, setData] = React.useState({ servers: [], cluster_stats: {} });
+    const [scoringProfile, setScoringProfile] = React.useState("BALANCED");
     const [histories, setHistories] = React.useState({});
     const [queryEndpointData, setQueryEndpointData] = React.useState({ endpoints: [] });
     const [selectedQueryServer, setSelectedQueryServer] = React.useState("");
@@ -626,21 +1142,32 @@ const AppShell = () => {
     const [queryRows, setQueryRows] = React.useState({ rank: [], trend: [], anomaly: [], net_detail: [], disk_detail: [], mem_detail: [], softirq_detail: [] });
     const [queryLoading, setQueryLoading] = React.useState({});
     const [queryError, setQueryError] = React.useState({});
+    const [cpuCoreRows, setCpuCoreRows] = React.useState([]);
+    const [cpuCoreLoading, setCpuCoreLoading] = React.useState(false);
+    const [cpuCoreError, setCpuCoreError] = React.useState("");
     const [anomalyThresholds, setAnomalyThresholds] = React.useState({
         cpu_threshold: 80,
         mem_threshold: 90,
         disk_threshold: 85,
         change_rate_threshold: 0.5
     });
+    const scoringProfileRef = React.useRef("BALANCED");
+
+    React.useEffect(() => {
+        scoringProfileRef.current = scoringProfile;
+    }, [scoringProfile]);
 
     React.useEffect(() => {
         // Init fetch
-        axios.get("/api/overview").then(res => setData(res.data)).catch(console.error);
+        axios.get("/api/overview", { params: { scoring_profile: scoringProfileRef.current } })
+            .then(res => setData(applyScoringProfileToOverview(res.data, scoringProfileRef.current)))
+            .catch(console.error);
         axios.get("/api/query-endpoints").then(res => setQueryEndpointData(res.data)).catch(console.error);
 
         const socket = io();
         socket.on("overview_update", (newData) => {
-            setData(newData);
+            const activeProfile = scoringProfileRef.current;
+            setData(applyScoringProfileToOverview(newData, activeProfile));
             // Append history
             const now = new Date().toLocaleTimeString("zh-CN", {hour12: false});
             setHistories(prev => {
@@ -665,6 +1192,12 @@ const AppShell = () => {
     }, []);
 
     React.useEffect(() => {
+        axios.get("/api/overview", { params: { scoring_profile: scoringProfile } })
+            .then(res => setData(applyScoringProfileToOverview(res.data, scoringProfile)))
+            .catch(console.error);
+    }, [scoringProfile]);
+
+    React.useEffect(() => {
         if (!selectedQueryServer && data.servers.length > 0) {
             setSelectedQueryServer(data.servers[0].server_name);
         }
@@ -679,14 +1212,20 @@ const AppShell = () => {
 
         try {
             if (targetView === "rank") {
-                const res = await axios.get("/api/rank", { params: { page: 1, page_size: 50, order: "DESC" } });
+                const res = await axios.get("/api/rank", {
+                    params: { page: 1, page_size: 50, order: "DESC", scoring_profile: scoringProfile }
+                });
                 setQueryRows(prev => ({ ...prev, rank: res.data.servers || [] }));
                 return;
             }
 
             if (targetView === "trend") {
                 const res = await axios.get(`/api/trend/${encodeURIComponent(selectedQueryServer)}`, {
-                    params: { hours: queryHours, interval_seconds: trendIntervalSeconds }
+                    params: {
+                        hours: queryHours,
+                        interval_seconds: trendIntervalSeconds,
+                        scoring_profile: scoringProfile
+                    }
                 });
                 setQueryRows(prev => ({ ...prev, trend: res.data.records || [] }));
                 return;
@@ -732,12 +1271,35 @@ const AppShell = () => {
         } finally {
             setQueryLoading(prev => ({ ...prev, [targetView]: false }));
         }
-    }, [selectedQueryServer, queryHours, trendIntervalSeconds, anomalyThresholds]);
+    }, [selectedQueryServer, queryHours, trendIntervalSeconds, anomalyThresholds, scoringProfile]);
 
     const handleAnomalyThresholdChange = (key, value) => {
         const nextValue = Number.isFinite(value) ? value : 0;
         setAnomalyThresholds(prev => ({ ...prev, [key]: nextValue }));
     };
+
+    const loadCpuCoreDetails = React.useCallback(async (options = {}) => {
+        const { silent = false } = options;
+        if (!silent) {
+            setCpuCoreLoading(true);
+        }
+        setCpuCoreError("");
+        try {
+            const res = await axios.get("/api/cpu-core-detail", {
+                params: {
+                    server_name: selectedQueryServer,
+                    hours: queryHours
+                }
+            });
+            setCpuCoreRows(res.data.records || []);
+        } catch (err) {
+            setCpuCoreError(err?.response?.data?.error || err.message || "CPU核心负载查询失败");
+        } finally {
+            if (!silent) {
+                setCpuCoreLoading(false);
+            }
+        }
+    }, [queryHours, selectedQueryServer]);
 
     React.useEffect(() => {
         const queryViews = ["rank", "trend", "anomaly", "net_detail", "disk_detail", "mem_detail", "softirq_detail"];
@@ -745,6 +1307,32 @@ const AppShell = () => {
             loadQueryViewData(view);
         }
     }, [view, loadQueryViewData]);
+
+    React.useEffect(() => {
+        if (view === "net") {
+            loadQueryViewData("net_detail");
+        } else if (view === "disk") {
+            loadQueryViewData("disk_detail");
+        }
+    }, [view, selectedQueryServer, queryHours, loadQueryViewData]);
+
+    React.useEffect(() => {
+        if (view === "cpu") {
+            loadCpuCoreDetails();
+        }
+    }, [view, loadCpuCoreDetails]);
+
+    React.useEffect(() => {
+        if (view !== "cpu") {
+            return;
+        }
+
+        const timer = setInterval(() => {
+            loadCpuCoreDetails({ silent: true });
+        }, 2000);
+
+        return () => clearInterval(timer);
+    }, [view, loadCpuCoreDetails]);
 
     const sidebarItems = [
         { id: "dashboard", label: "总览看板", icon: "📊" },
@@ -795,6 +1383,22 @@ const AppShell = () => {
         if (view === "dashboard") {
             return (
                 <Box sx={{ height: "100%", display: "flex", flexDirection: "column", p: 3, gap: 3 }}>
+                    <Paper sx={{ p: 2, display: "flex", alignItems: "center", gap: 2 }}>
+                        <Typography variant="body2" color="text.secondary">评分体系</Typography>
+                        <Select
+                            size="small"
+                            value={scoringProfile}
+                            onChange={(e) => setScoringProfile(e.target.value)}
+                            sx={{ minWidth: 180 }}
+                        >
+                            {SCORING_PROFILES.map((p) => (
+                                <MenuItem key={p.value} value={p.value}>{p.label}</MenuItem>
+                            ))}
+                        </Select>
+                        <Typography variant="caption" color="text.secondary">
+                            当前总览分数按所选业务场景重算
+                        </Typography>
+                    </Paper>
                     <Box sx={{ height: "30%", minHeight: 200 }}>
                         <TopStats clusterStats={data.cluster_stats} />
                     </Box>
@@ -831,6 +1435,8 @@ const AppShell = () => {
                         servers={data.servers}
                         selectedServer={selectedQueryServer}
                         onServerChange={setSelectedQueryServer}
+                        scoringProfile={scoringProfile}
+                        onScoringProfileChange={setScoringProfile}
                         hours={queryHours}
                         onHoursChange={setQueryHours}
                         intervalSeconds={trendIntervalSeconds}
@@ -862,6 +1468,85 @@ const AppShell = () => {
         };
 
         const m = metrics[view];
+        if (m && view === "cpu") {
+            return (
+                <CpuCoreBarsView
+                    servers={data.servers}
+                    selectedServer={selectedQueryServer}
+                    onServerChange={setSelectedQueryServer}
+                    scoringProfile={scoringProfile}
+                    onScoringProfileChange={setScoringProfile}
+                    hours={queryHours}
+                    onHoursChange={setQueryHours}
+                    onRefresh={loadCpuCoreDetails}
+                    cpuCoreRows={cpuCoreRows}
+                    cpuCoreLoading={cpuCoreLoading}
+                    cpuCoreError={cpuCoreError}
+                    nodeHistories={histories}
+                />
+            );
+        }
+
+        if (view === "net") {
+            return (
+                <Box sx={{ p: 4, height: "100%", overflowY: "auto" }}>
+                    <QueryControlBar
+                        servers={data.servers}
+                        selectedServer={selectedQueryServer}
+                        onServerChange={setSelectedQueryServer}
+                        scoringProfile={scoringProfile}
+                        onScoringProfileChange={setScoringProfile}
+                        hours={queryHours}
+                        onHoursChange={setQueryHours}
+                        intervalSeconds={trendIntervalSeconds}
+                        onIntervalChange={setTrendIntervalSeconds}
+                        showInterval={false}
+                        showAnomalyThresholds={false}
+                        anomalyThresholds={anomalyThresholds}
+                        onAnomalyThresholdChange={handleAnomalyThresholdChange}
+                        onRefresh={() => loadQueryViewData("net_detail")}
+                    />
+                    <FlowTripleMonitorView
+                        mode="net"
+                        selectedServer={selectedQueryServer}
+                        rows={queryRows.net_detail || []}
+                        loading={!!queryLoading.net_detail}
+                        error={queryError.net_detail}
+                    />
+                </Box>
+            );
+        }
+
+        if (view === "disk") {
+            return (
+                <Box sx={{ p: 4, height: "100%", overflowY: "auto" }}>
+                    <QueryControlBar
+                        servers={data.servers}
+                        selectedServer={selectedQueryServer}
+                        onServerChange={setSelectedQueryServer}
+                        scoringProfile={scoringProfile}
+                        onScoringProfileChange={setScoringProfile}
+                        hours={queryHours}
+                        onHoursChange={setQueryHours}
+                        intervalSeconds={trendIntervalSeconds}
+                        onIntervalChange={setTrendIntervalSeconds}
+                        showInterval={false}
+                        showAnomalyThresholds={false}
+                        anomalyThresholds={anomalyThresholds}
+                        onAnomalyThresholdChange={handleAnomalyThresholdChange}
+                        onRefresh={() => loadQueryViewData("disk_detail")}
+                    />
+                    <FlowTripleMonitorView
+                        mode="disk"
+                        selectedServer={selectedQueryServer}
+                        rows={queryRows.disk_detail || []}
+                        loading={!!queryLoading.disk_detail}
+                        error={queryError.disk_detail}
+                    />
+                </Box>
+            );
+        }
+
         if (m) {
             return (
                 <DetailView 

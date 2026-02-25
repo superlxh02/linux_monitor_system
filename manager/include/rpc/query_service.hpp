@@ -69,9 +69,18 @@ class QueryServiceImpl : public monitor::proto::QueryService::Service {
       const ::monitor::proto::QueryDetailRequest* request,
       ::monitor::proto::QuerySoftIrqDetailResponse* response) override;
 
+  // CPU 核心详细数据查询
+  ::grpc::Status QueryCpuCoreDetail(
+      ::grpc::ServerContext* context,
+      const ::monitor::proto::QueryDetailRequest* request,
+      ::monitor::proto::QueryCpuCoreDetailResponse* response) override;
+
  private:
   // 转换时间范围
     TimeRange convert_time_range(const ::monitor::proto::TimeRange& proto_range);
+
+        ScoringProfile convert_scoring_profile(
+                ::monitor::proto::ScoringProfile profile);
 
   // 转换时间点到protobuf Timestamp
     void set_timestamp(::google::protobuf::Timestamp* ts,

@@ -2,7 +2,11 @@
 
 ## 1. 项目简介
 
-本系统是一个**分布式 Linux 主机性能监控与查询平台**，采用 **Manager-Worker** 架构：多台机器上的 **Worker** 周期性采集本机 CPU、内存、磁盘、网络、软中断等指标，通过 gRPC 推送到中心 **Manager**；Manager 将数据写入 MySQL，并对外提供统一的 **gRPC 查询服务**，支持按时间范围、服务器、分页等条件查询性能数据、趋势、异常与评分排名。
+本系统是一个**分布式 Linux 主机性能监控与查询平台**，采用 **Manager-Worker** 架构：多台机器上的 **Worker** 周期性采集本机 CPU、内存、磁盘、网络、软中断等指标，通过 gRPC 推送到中心 **Manager**；Manager 将数据写入 MySQL，并对外提供统一的 **gRPC 查询服务**。
+
+项目同时提供一个基于 **Node.js** 的前端监控面板示例（`web_dashboard_example/`），用于实时总览、趋势分析与多维度明细查询展示。
+
+系统支持按时间范围、服务器、分页等条件查询性能数据、趋势、异常与评分排名；并支持**多业务场景评分体系**（如通用均衡、高并发、I/O 密集、内存敏感），前端可切换评分体系，后端按所选体系动态返回评分结果。
 
 适用于机房/集群的统一监控、性能回溯与异常分析场景。
 
@@ -12,7 +16,9 @@
 
 - **推送式采集**：Worker 主动向 Manager 推送监控数据，无需 Manager 轮询，便于跨网段、多节点部署。
 - **多维度指标**：支持 CPU 负载与状态、内存、磁盘 I/O、网络流量（基于 eBPF）、软中断（SoftIRQ）等；可选内核模块采集更细粒度数据。
-- **可扩展查询**：基于 gRPC + Protobuf 的查询 API，支持时间段性能、趋势聚合、异常检测、评分排序及各类详细数据分页查询。
+- **多场景评分**：支持 `BALANCED`、`HIGH_CONCURRENCY`、`IO_INTENSIVE`、`MEMORY_SENSITIVE` 四套评分体系，适配不同业务负载。
+- **可扩展查询**：基于 gRPC + Protobuf 的查询 API，支持时间段性能、趋势聚合、异常检测、评分排序及各类详细数据分页查询；评分相关接口支持按场景传入 `scoring_profile`。
+- **可视化示例面板**：内置基于 Node.js（Express + Socket.IO）与 React 的监控面板示例，便于开箱即用展示与二次开发。
 - **文件日志**：Manager/Worker 使用项目内 fastlog 写入文件日志，便于后台运行与问题排查。
 - **一键启停**：根目录 `scripts/start.sh`、`scripts/stop.sh` 支持默认启停 Manager+Worker，或通过 `--manager` / `--worker` 只操作其一。
 
@@ -103,6 +109,7 @@ sudo ./scripts/start.sh --worker
 
 - 实时总览（健康度、节点状态、关键指标）
 - 细分监控项（CPU / 内存 / 磁盘 / 网络）
+- CPU 负载细节页支持 **每节点每核心柱状负载视图**（类似 btop）+ **节点总CPU负载曲线**（柱状在上、曲线在下）
 - 完整查询页（评分排行、趋势聚合、异常、网络详情、磁盘详情、内存详情、软中断详情）
 - 查询端口清单页（展示 gRPC / HTTP / Socket 暴露入口）
 
@@ -118,29 +125,43 @@ npm start
 
 说明：面板依赖 Manager 查询服务，请先启动 Manager（默认监听 `0.0.0.0:50051`）。
 
+若使用 CPU 核心柱状视图，请确认数据库已执行最新版建表脚本（包含 `server_cpu_core_detail` 表）：
+
+```bash
+mysql -u monitor -pmonitor123 monitor_db < manager/sql/server.sql
+```
+
 ---
 
 ## 5. 暴露的查询 API
 
-所有查询均通过 **gRPC 服务 `monitor.proto.QueryService`** 暴露，默认端口与 Manager 监听地址一致（如 `0.0.0.0:50051`）。请求/响应消息定义见 `proto/query_api.proto`。
+所有查询均通过 **Manager gRPC 服务 `monitor.proto.QueryService`** 暴露，默认端口与 Manager 监听地址一致（如 `0.0.0.0:50051`）。请求/响应消息定义见 `proto/query_api.proto`。
 
-| API                          | 说明                       | 请求                                                     | 响应                                      |
-| ---------------------------- | -------------------------- | -------------------------------------------------------- | ----------------------------------------- |
-| **QueryPerformance**   | 时间段内性能数据（分页）   | 服务器名、时间范围、分页                                 | 性能记录列表 + total_count/page/page_size |
-| **QueryTrend**         | 变化率趋势（可按间隔聚合） | 服务器名、时间范围、聚合间隔(秒)                         | 趋势记录列表                              |
-| **QueryAnomaly**       | 异常数据（超阈值）         | 服务器名(可选)、时间范围、CPU/内存/磁盘/变化率阈值、分页 | 异常记录列表 + 分页信息                   |
-| **QueryScoreRank**     | 评分排序（支持升降序）     | 排序方式、分页                                           | 评分记录列表 + 分页信息                   |
-| **QueryLatestScore**   | 各服务器最新评分           | 无参                                                     | 最新评分记录列表                          |
-| **QueryNetDetail**     | 网络详细数据（分页）       | 服务器名、时间范围、分页                                 | 网络详细记录 + 分页信息                   |
-| **QueryDiskDetail**    | 磁盘详细数据（分页）       | 服务器名、时间范围、分页                                 | 磁盘详细记录 + 分页信息                   |
-| **QueryMemDetail**     | 内存详细数据（分页）       | 服务器名、时间范围、分页                                 | 内存详细记录 + 分页信息                   |
-| **QuerySoftIrqDetail** | 软中断详细数据（分页）     | 服务器名、时间范围、分页                                 | SoftIRQ 详细记录 + 分页信息               |
+### 5.1 Manager gRPC 查询 API
+
+| API                          | 说明                       | 请求                                                     | 响应                                                           |
+| ---------------------------- | -------------------------- | -------------------------------------------------------- | -------------------------------------------------------------- |
+| **QueryPerformance**   | 时间段内性能数据（分页）   | 服务器名、时间范围、分页、`scoring_profile`            | 性能记录列表 + total_count/page/page_size +`scoring_profile` |
+| **QueryTrend**         | 变化率趋势（可按间隔聚合） | 服务器名、时间范围、聚合间隔(秒)、`scoring_profile`    | 趋势记录列表 +`scoring_profile`                              |
+| **QueryAnomaly**       | 异常数据（超阈值）         | 服务器名(可选)、时间范围、CPU/内存/磁盘/变化率阈值、分页 | 异常记录列表 + 分页信息                                        |
+| **QueryScoreRank**     | 评分排序（支持升降序）     | 排序方式、分页、`scoring_profile`                      | 评分记录列表 + 分页信息 +`scoring_profile`                   |
+| **QueryLatestScore**   | 各服务器最新评分           | `scoring_profile`                                      | 最新评分记录列表 + 集群统计 +`scoring_profile`               |
+| **QueryNetDetail**     | 网络详细数据（分页）       | 服务器名、时间范围、分页                                 | 网络详细记录 + 分页信息                                        |
+| **QueryDiskDetail**    | 磁盘详细数据（分页）       | 服务器名、时间范围、分页                                 | 磁盘详细记录 + 分页信息                                        |
+| **QueryMemDetail**     | 内存详细数据（分页）       | 服务器名、时间范围、分页                                 | 内存详细记录 + 分页信息                                        |
+| **QuerySoftIrqDetail** | 软中断详细数据（分页）     | 服务器名、时间范围、分页                                 | SoftIRQ 详细记录 + 分页信息                                    |
+| **QueryCpuCoreDetail** | CPU 核心详细数据（分页）   | 服务器名、时间范围、分页                                 | CPU 核心记录 + 分页信息                                        |
 
 **公共参数说明：**
 
 - **TimeRange**：`start_time`、`end_time`（google.protobuf.Timestamp）。
 - **Pagination**：`page`（从 1 开始）、`page_size`（默认 100）。
 - **SortOrder**：`DESC` / `ASC`（用于 QueryScoreRank）。
+- **ScoringProfile**（评分场景）：
+  - `BALANCED`：通用均衡（默认）
+  - `HIGH_CONCURRENCY`：高并发场景
+  - `IO_INTENSIVE`：I/O 密集场景
+  - `MEMORY_SENSITIVE`：内存敏感场景
 
 客户端可通过生成的 gRPC 桩（如 `query_api.grpc.pb.h`）连接 Manager 地址并调用上述 RPC。
 
@@ -163,3 +184,45 @@ npm start
   写入路径（HostManager + MySQL）与查询路径（QueryManager + QueryService）在逻辑上分离：HostManager 只关心“收到推送 → 算分 → 写库”，QueryManager 只关心“按条件查库并返回”。两者共用同一套表结构，便于后续做只读从库、分表等优化而不影响采集链路。
 
 ---
+
+## 7. 监控评分体系
+
+### 7.1 设计目标
+
+评分体系用于把多维监控指标（CPU、内存、负载、磁盘、网络）压缩为 0~100 的综合健康分，便于：
+
+- 实时比较“哪台机器更适合承接请求”；
+- 在不同业务场景下进行一致的排序与分流；
+- 为趋势分析、告警和容量评估提供统一参考值。
+
+### 7.2 归一化与总分公式
+
+对每个指标先做反向归一化（越空闲得分越高），再加权求和：
+
+\[S = w_{cpu}\cdot SCPU + w_{mem}\cdot SMEM + w_{load}\cdot SLOAD + w_{disk}\cdot SDISK + w_{net}\cdot\frac{SINET+SONET}{2}]
+
+\[Score = 100\cdot clamp(S, 0, 1)]
+
+其中：
+
+- (SCPU = 1 - PCPU/100\)
+- \(SMEM = 1 - PMEM/100\)
+- \(SLOAD = 1 - PLOAD/PLOAD_{max}\)
+- \(SDISK = 1 - PDISK/100\)
+- \(SINET = 1 - PINET/PINET_{max}\), \(SONET = 1 - PONET/PONET_{max}\)
+
+默认实现中：
+
+- \(PLOAD_{max}=CPU核心数\times N\)，`N` 随场景配置；
+- 网络上限按 1Gbps 近似：`125000000 B/s`。
+
+### 7.3 场景化评分体系
+
+系统支持 4 套可切换评分体系（`ScoringProfile`）：
+
+| 评分体系             | 适用场景             |  CPU | 内存 | 负载 | 磁盘 | 网络 | 负载系数 N |
+| -------------------- | -------------------- | ---: | ---: | ---: | ---: | ---: | ---------: |
+| `BALANCED`         | 通用均衡             | 0.35 | 0.30 | 0.15 | 0.15 | 0.05 |        1.5 |
+| `HIGH_CONCURRENCY` | 高并发 Web/API       | 0.45 | 0.25 | 0.15 | 0.10 | 0.05 |        1.2 |
+| `IO_INTENSIVE`     | 数据库/存储 I/O 密集 | 0.20 | 0.15 | 0.20 | 0.35 | 0.10 |        2.0 |
+| `MEMORY_SENSITIVE` | 缓存/大内存敏感      | 0.20 | 0.45 | 0.15 | 0.10 | 0.10 |     1.5--- |

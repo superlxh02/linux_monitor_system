@@ -29,6 +29,14 @@ enum ServerStatus {
     OFFLINE = 1;
 }
 
+// 评分体系（业务场景）
+enum ScoringProfile {
+    BALANCED = 0;          // 通用均衡（默认）
+    HIGH_CONCURRENCY = 1;  // 高并发 Web/API
+    IO_INTENSIVE = 2;      // 数据库/存储 I/O 密集
+    MEMORY_SENSITIVE = 3;  // 缓存/大内存敏感
+}
+
 // ========== 请求消息 ==========
 
 // 时间段性能数据查询请求
@@ -36,6 +44,7 @@ message QueryPerformanceRequest {
     string server_name = 1;
     TimeRange time_range = 2;
     Pagination pagination = 3;
+    ScoringProfile scoring_profile = 4;
 }
 
 // 变化率趋势查询请求
@@ -43,6 +52,7 @@ message QueryTrendRequest {
     string server_name = 1;
     TimeRange time_range = 2;
     int32 interval_seconds = 3;  // 聚合间隔（秒），0表示不聚合
+    ScoringProfile scoring_profile = 4;
 }
 
 // 异常查询请求
@@ -60,11 +70,12 @@ message QueryAnomalyRequest {
 message QueryScoreRankRequest {
     SortOrder order = 1;
     Pagination pagination = 2;
+    ScoringProfile scoring_profile = 3;
 }
 
 // 最新评分查询请求
 message QueryLatestScoreRequest {
-    // 无参数，返回所有服务器最新数据
+    ScoringProfile scoring_profile = 1;
 }
 
 // 详细数据查询请求
@@ -164,12 +175,14 @@ message QueryPerformanceResponse {
     int32 total_count = 2;
     int32 page = 3;
     int32 page_size = 4;
+    ScoringProfile scoring_profile = 5;
 }
 
 // 变化率趋势查询响应
 message QueryTrendResponse {
     repeated PerformanceRecord records = 1;
     int32 interval_seconds = 2;
+    ScoringProfile scoring_profile = 3;
 }
 
 // 异常查询响应
@@ -186,12 +199,14 @@ message QueryScoreRankResponse {
     int32 total_count = 2;
     int32 page = 3;
     int32 page_size = 4;
+    ScoringProfile scoring_profile = 5;
 }
 
 // 最新评分查询响应
 message QueryLatestScoreResponse {
     repeated ServerScoreSummary servers = 1;
     ClusterStats cluster_stats = 2;
+    ScoringProfile scoring_profile = 3;
 }
 
 // ========== 详细数据记录 ==========
@@ -295,6 +310,21 @@ message SoftIrqDetailRecord {
     float sched_rate = 25;
 }
 
+// CPU 核心详细数据
+message CpuCoreDetailRecord {
+    string server_name = 1;
+    string cpu_name = 2;
+    google.protobuf.Timestamp timestamp = 3;
+    float cpu_percent = 10;
+    float usr_percent = 11;
+    float system_percent = 12;
+    float nice_percent = 13;
+    float idle_percent = 14;
+    float io_wait_percent = 15;
+    float irq_percent = 16;
+    float soft_irq_percent = 17;
+}
+
 // ========== 详细数据查询响应 ==========
 
 message QueryNetDetailResponse {
@@ -325,6 +355,13 @@ message QuerySoftIrqDetailResponse {
     int32 page_size = 4;
 }
 
+message QueryCpuCoreDetailResponse {
+    repeated CpuCoreDetailRecord records = 1;
+    int32 total_count = 2;
+    int32 page = 3;
+    int32 page_size = 4;
+}
+
 // ========== 查询服务定义 ==========
 
 service QueryService {
@@ -348,4 +385,7 @@ service QueryService {
     rpc QueryDiskDetail(QueryDetailRequest) returns (QueryDiskDetailResponse);
     rpc QueryMemDetail(QueryDetailRequest) returns (QueryMemDetailResponse);
     rpc QuerySoftIrqDetail(QueryDetailRequest) returns (QuerySoftIrqDetailResponse);
+
+    // CPU 核心详细数据查询
+    rpc QueryCpuCoreDetail(QueryDetailRequest) returns (QueryCpuCoreDetailResponse);
 }

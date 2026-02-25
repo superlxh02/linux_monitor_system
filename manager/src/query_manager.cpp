@@ -1,5 +1,6 @@
 #include "query_manager.hpp"
 
+#include <algorithm>
 #include <ctime>
 #include <iomanip>
 #include <sstream>
@@ -10,6 +11,61 @@ namespace monitor {
 
 namespace {
 constexpr char kManagerLoggerName[] = "manager_file_logger";
+
+struct ScoreWeights {
+  double cpu_weight;
+  double mem_weight;
+  double load_weight;
+  double disk_weight;
+  double net_weight;
+  double load_coefficient;
+  double max_bandwidth;
+};
+
+ScoreWeights get_score_weights(ScoringProfile profile) {
+  switch (profile) {
+    case ScoringProfile::HIGH_CONCURRENCY:
+      return ScoreWeights{0.45, 0.25, 0.15, 0.10, 0.05, 1.2, 125000000.0};
+    case ScoringProfile::IO_INTENSIVE:
+      return ScoreWeights{0.20, 0.15, 0.20, 0.35, 0.10, 2.0, 125000000.0};
+    case ScoringProfile::MEMORY_SENSITIVE:
+      return ScoreWeights{0.20, 0.45, 0.15, 0.10, 0.10, 1.5, 125000000.0};
+    case ScoringProfile::BALANCED:
+    default:
+      return ScoreWeights{0.35, 0.30, 0.15, 0.15, 0.05, 1.5, 125000000.0};
+  }
+}
+
+double calc_score_by_profile(float cpu_percent, float mem_percent,
+                             float load_avg_1, float disk_util_percent,
+                             float send_rate_kb, float rcv_rate_kb,
+                             ScoringProfile profile, int cpu_cores = 4) {
+  const ScoreWeights w = get_score_weights(profile);
+  const auto clamp01 = [](double v) {
+    return v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v);
+  };
+
+  if (cpu_cores < 1) {
+    cpu_cores = 1;
+  }
+
+  const double net_send_bytes = static_cast<double>(send_rate_kb) * 1024.0;
+  const double net_rcv_bytes = static_cast<double>(rcv_rate_kb) * 1024.0;
+
+  const double cpu_score = clamp01(1.0 - cpu_percent / 100.0);
+  const double mem_score = clamp01(1.0 - mem_percent / 100.0);
+  const double load_score =
+      clamp01(1.0 - load_avg_1 / (cpu_cores * w.load_coefficient));
+  const double disk_score = clamp01(1.0 - disk_util_percent / 100.0);
+  const double net_recv_score = clamp01(1.0 - net_rcv_bytes / w.max_bandwidth);
+  const double net_send_score = clamp01(1.0 - net_send_bytes / w.max_bandwidth);
+  const double net_score = (net_recv_score + net_send_score) / 2.0;
+
+  const double score = cpu_score * w.cpu_weight + mem_score * w.mem_weight +
+                       load_score * w.load_weight + disk_score * w.disk_weight +
+                       net_score * w.net_weight;
+  return clamp01(score) * 100.0;
+}
 }
 
 QueryManager::QueryManager() = default;
@@ -104,7 +160,8 @@ int QueryManager::get_total_count(const std::string &count_sql) {
 std::vector<PerformanceRecord>
 QueryManager::query_performance(const std::string &server_name,
                                 const TimeRange &time_range, int page,
-                                int page_size, int *total_count) {
+                                int page_size, int *total_count,
+                                ScoringProfile scoring_profile) {
   std::vector<PerformanceRecord> records;
 
   std::lock_guard<std::mutex> lock(_mtx);
@@ -216,6 +273,9 @@ QueryManager::query_performance(const std::string &server_name,
     rec.send_rate_rate = row[i] ? std::atof(row[i]) : 0;
     i++;
     rec.rcv_rate_rate = row[i] ? std::atof(row[i]) : 0;
+    rec.score = static_cast<float>(calc_score_by_profile(
+      rec.cpu_percent, rec.mem_used_percent, rec.load_avg_1,
+      rec.disk_util_percent, rec.send_rate, rec.rcv_rate, scoring_profile));
     records.push_back(rec);
   }
   mysql_free_result(result);
@@ -224,7 +284,8 @@ QueryManager::query_performance(const std::string &server_name,
 
 std::vector<PerformanceRecord>
 QueryManager::query_trend(const std::string &server_name,
-                          const TimeRange &time_range, int interval_seconds) {
+                          const TimeRange &time_range, int interval_seconds,
+                          ScoringProfile scoring_profile) {
   std::vector<PerformanceRecord> records;
 
   std::lock_guard<std::mutex> lock(_mtx);
@@ -329,6 +390,9 @@ QueryManager::query_trend(const std::string &server_name,
     rec.disk_util_percent_rate = row[i] ? std::atof(row[i]) : 0;
     i++;
     rec.load_avg_1_rate = row[i] ? std::atof(row[i]) : 0;
+    rec.score = static_cast<float>(calc_score_by_profile(
+      rec.cpu_percent, rec.mem_used_percent, rec.load_avg_1,
+      rec.disk_util_percent, rec.send_rate, rec.rcv_rate, scoring_profile));
     records.push_back(rec);
   }
   mysql_free_result(result);
@@ -465,7 +529,8 @@ QueryManager::query_anomaly(const std::string &server_name,
 
 std::vector<ServerScoreSummary>
 QueryManager::query_score_rank(SortOrder order, int page, int page_size,
-                               int *total_count) {
+                               int *total_count,
+                               ScoringProfile scoring_profile) {
   std::vector<ServerScoreSummary> records;
 
   std::lock_guard<std::mutex> lock(_mtx);
@@ -485,20 +550,18 @@ QueryManager::query_score_rank(SortOrder order, int page, int page_size,
     *total_count = get_total_count(count_sql);
   }
 
-  // 查询每台服务器的最新数据并排序
+  // 查询每台服务器的最新数据，评分按所选 profile 在内存中计算与排序
   int offset = (page - 1) * page_size;
-  std::string order_str = (order == SortOrder::ASC) ? "ASC" : "DESC";
 
   std::ostringstream sql;
-  sql << "SELECT p1.server_name, p1.score, p1.timestamp, p1.cpu_percent, "
-         "p1.mem_used_percent, p1.disk_util_percent, p1.load_avg_1 "
+    sql << "SELECT p1.server_name, p1.score, p1.timestamp, p1.cpu_percent, "
+      "p1.mem_used_percent, p1.disk_util_percent, p1.load_avg_1, "
+      "p1.send_rate, p1.rcv_rate "
          "FROM server_performance p1 "
          "INNER JOIN ("
          "  SELECT server_name, MAX(timestamp) as max_ts "
          "  FROM server_performance GROUP BY server_name"
-         ") p2 ON p1.server_name = p2.server_name AND p1.timestamp = p2.max_ts "
-         "ORDER BY p1.score "
-      << order_str << " LIMIT " << page_size << " OFFSET " << offset;
+        ") p2 ON p1.server_name = p2.server_name AND p1.timestamp = p2.max_ts";
 
   if (mysql_query(conn_, sql.str().c_str()) != 0) {
     fastlog::file::get_logger(kManagerLoggerName)->error("QueryManager: score rank query failed: {}",
@@ -522,6 +585,11 @@ QueryManager::query_score_rank(SortOrder order, int page, int page_size,
     rec.mem_used_percent = row[4] ? std::atof(row[4]) : 0;
     rec.disk_util_percent = row[5] ? std::atof(row[5]) : 0;
     rec.load_avg_1 = row[6] ? std::atof(row[6]) : 0;
+    float send_rate = row[7] ? std::atof(row[7]) : 0;
+    float rcv_rate = row[8] ? std::atof(row[8]) : 0;
+    rec.score = static_cast<float>(calc_score_by_profile(
+        rec.cpu_percent, rec.mem_used_percent, rec.load_avg_1,
+      rec.disk_util_percent, send_rate, rcv_rate, scoring_profile));
 
     // 判断在线状态（60秒阈值）
     auto age =
@@ -532,11 +600,25 @@ QueryManager::query_score_rank(SortOrder order, int page, int page_size,
     records.push_back(rec);
   }
   mysql_free_result(result);
-  return records;
+
+  std::sort(records.begin(), records.end(), [order](const auto &a, const auto &b) {
+    if (order == SortOrder::ASC) {
+      return a.score < b.score;
+    }
+    return a.score > b.score;
+  });
+
+  if (offset >= static_cast<int>(records.size())) {
+    return {};
+  }
+  int end = std::min(offset + page_size, static_cast<int>(records.size()));
+  return std::vector<ServerScoreSummary>(records.begin() + offset,
+                                         records.begin() + end);
 }
 
 std::vector<ServerScoreSummary>
-QueryManager::query_latest_score(ClusterStats *stats) {
+QueryManager::query_latest_score(ClusterStats *stats,
+                                 ScoringProfile scoring_profile) {
   std::vector<ServerScoreSummary> records;
 
   std::lock_guard<std::mutex> lock(_mtx);
@@ -547,13 +629,14 @@ QueryManager::query_latest_score(ClusterStats *stats) {
   // 查询每台服务器的最新数据
   std::string sql =
       "SELECT p1.server_name, p1.score, p1.timestamp, p1.cpu_percent, "
-      "p1.mem_used_percent, p1.disk_util_percent, p1.load_avg_1 "
+      "p1.mem_used_percent, p1.disk_util_percent, p1.load_avg_1, "
+      "p1.send_rate, p1.rcv_rate "
       "FROM server_performance p1 "
       "INNER JOIN ("
       "  SELECT server_name, MAX(timestamp) as max_ts "
       "  FROM server_performance GROUP BY server_name"
       ") p2 ON p1.server_name = p2.server_name AND p1.timestamp = p2.max_ts "
-      "ORDER BY p1.score DESC";
+      "ORDER BY p1.timestamp DESC";
 
   if (mysql_query(conn_, sql.c_str()) != 0) {
     fastlog::file::get_logger(kManagerLoggerName)->error("QueryManager: latest score query failed: {}",
@@ -583,6 +666,11 @@ QueryManager::query_latest_score(ClusterStats *stats) {
     rec.mem_used_percent = row[4] ? std::atof(row[4]) : 0;
     rec.disk_util_percent = row[5] ? std::atof(row[5]) : 0;
     rec.load_avg_1 = row[6] ? std::atof(row[6]) : 0;
+    float send_rate = row[7] ? std::atof(row[7]) : 0;
+    float rcv_rate = row[8] ? std::atof(row[8]) : 0;
+    rec.score = static_cast<float>(calc_score_by_profile(
+      rec.cpu_percent, rec.mem_used_percent, rec.load_avg_1,
+      rec.disk_util_percent, send_rate, rcv_rate, scoring_profile));
 
     // 判断在线状态（60秒阈值）
     auto age =
@@ -610,6 +698,9 @@ QueryManager::query_latest_score(ClusterStats *stats) {
     records.push_back(rec);
   }
   mysql_free_result(result);
+
+  std::sort(records.begin(), records.end(),
+            [](const auto &a, const auto &b) { return a.score > b.score; });
 
   // 填充集群统计
   if (stats) {
@@ -946,6 +1037,99 @@ QueryManager::query_softirq_detail(const std::string &server_name,
     rec.block = row[i] ? std::stoll(row[i]) : 0;
     i++;
     rec.sched = row[i] ? std::stoll(row[i]) : 0;
+    records.push_back(rec);
+  }
+  mysql_free_result(result);
+
+  return records;
+}
+
+std::vector<CpuCoreDetailRecord>
+QueryManager::query_cpu_core_detail(const std::string &server_name,
+                                    const TimeRange &time_range, int page,
+                                    int page_size, int *total_count) {
+  std::vector<CpuCoreDetailRecord> records;
+
+  std::lock_guard<std::mutex> lock(_mtx);
+  if (!_initialized || !conn_) {
+    return records;
+  }
+
+  if (!validate_timerange(time_range)) {
+    return records;
+  }
+  if (page < 1)
+    page = 1;
+  if (page_size < 1)
+    page_size = 100;
+
+  std::string start_time = format_time(time_range.start_time);
+  std::string end_time = format_time(time_range.end_time);
+
+    std::ostringstream count_sql;
+    count_sql << "SELECT COUNT(DISTINCT cpu_name) FROM server_cpu_core_detail "
+          << "WHERE server_name='" << server_name
+          << "' AND timestamp BETWEEN '" << start_time << "' AND '"
+          << end_time << "'";
+  if (total_count) {
+    *total_count = get_total_count(count_sql.str());
+  }
+
+  int offset = (page - 1) * page_size;
+  std::ostringstream sql;
+    sql << "SELECT d.server_name, d.cpu_name, d.timestamp, d.cpu_percent, "
+        "d.usr_percent, d.system_percent, d.nice_percent, d.idle_percent, "
+        "d.io_wait_percent, d.irq_percent, d.soft_irq_percent "
+        "FROM server_cpu_core_detail d "
+        "INNER JOIN ("
+        "  SELECT cpu_name, MAX(timestamp) AS latest_ts "
+        "  FROM server_cpu_core_detail "
+        "  WHERE server_name='"
+      << server_name << "' AND timestamp BETWEEN '" << start_time << "' AND '"
+      << end_time
+      << "' GROUP BY cpu_name"
+        ") latest ON d.cpu_name = latest.cpu_name AND d.timestamp = latest.latest_ts "
+        "WHERE d.server_name='"
+      << server_name << "' "
+        "ORDER BY d.cpu_name ASC LIMIT "
+      << page_size << " OFFSET " << offset;
+
+  if (mysql_query(conn_, sql.str().c_str()) != 0) {
+    fastlog::file::get_logger(kManagerLoggerName)
+        ->error("QueryManager: cpu core detail query failed: {}",
+                mysql_error(conn_));
+    return records;
+  }
+
+  MYSQL_RES *result = mysql_store_result(conn_);
+  if (!result) {
+    return records;
+  }
+
+  MYSQL_ROW row;
+  while ((row = mysql_fetch_row(result))) {
+    CpuCoreDetailRecord rec;
+    int i = 0;
+    rec.server_name = row[i++] ? row[i - 1] : "";
+    rec.cpu_name = row[i++] ? row[i - 1] : "";
+    rec.timestamp =
+        row[i] ? parse_time(row[i]) : std::chrono::system_clock::now();
+    i++;
+    rec.cpu_percent = row[i] ? std::atof(row[i]) : 0;
+    i++;
+    rec.usr_percent = row[i] ? std::atof(row[i]) : 0;
+    i++;
+    rec.system_percent = row[i] ? std::atof(row[i]) : 0;
+    i++;
+    rec.nice_percent = row[i] ? std::atof(row[i]) : 0;
+    i++;
+    rec.idle_percent = row[i] ? std::atof(row[i]) : 0;
+    i++;
+    rec.io_wait_percent = row[i] ? std::atof(row[i]) : 0;
+    i++;
+    rec.irq_percent = row[i] ? std::atof(row[i]) : 0;
+    i++;
+    rec.soft_irq_percent = row[i] ? std::atof(row[i]) : 0;
     records.push_back(rec);
   }
   mysql_free_result(result);

@@ -35,6 +35,7 @@ const QUERY_ENDPOINTS = [
     { type: 'HTTP', method: 'GET', path: '/api/disk-detail', target: `0.0.0.0:${PORT}`, description: '磁盘详情（映射 QueryDiskDetail）' },
     { type: 'HTTP', method: 'GET', path: '/api/mem-detail', target: `0.0.0.0:${PORT}`, description: '内存详情（映射 QueryMemDetail）' },
     { type: 'HTTP', method: 'GET', path: '/api/softirq-detail', target: `0.0.0.0:${PORT}`, description: '软中断详情（映射 QuerySoftIrqDetail）' },
+    { type: 'HTTP', method: 'GET', path: '/api/cpu-core-detail', target: `0.0.0.0:${PORT}`, description: 'CPU核心负载详情（映射 QueryCpuCoreDetail）' },
     { type: 'HTTP', method: 'GET', path: '/api/query-endpoints', target: `0.0.0.0:${PORT}`, description: '查询端口清单' },
 
     // Real-time push channel
@@ -87,6 +88,12 @@ const timestampToMillis = (timestamp) => {
 const toFiniteNumber = (value) => {
     const numeric = Number(value);
     return Number.isFinite(numeric) ? numeric : 0;
+};
+
+const normalizeScoringProfile = (rawProfile) => {
+    const profile = String(rawProfile || 'BALANCED').toUpperCase();
+    const allowed = new Set(['BALANCED', 'HIGH_CONCURRENCY', 'IO_INTENSIVE', 'MEMORY_SENSITIVE']);
+    return allowed.has(profile) ? profile : 'BALANCED';
 };
 
 const bytesToKB = (bytesPerSec) => toFiniteNumber(bytesPerSec) / 1024;
@@ -170,7 +177,8 @@ const enrichOverviewWithNetRates = async (overviewResponse) => {
 // Get Latest Scores (Overview)
 app.get('/api/overview', async (req, res) => {
     try {
-        const response = await promisifyGrpc('QueryLatestScore', {});
+        const scoring_profile = normalizeScoringProfile(req.query.scoring_profile || req.query.profile);
+        const response = await promisifyGrpc('QueryLatestScore', { scoring_profile });
         const enriched = await enrichOverviewWithNetRates(response);
         res.json(enriched);
     } catch (err) {
@@ -182,6 +190,7 @@ app.get('/api/overview', async (req, res) => {
 app.get('/api/performance/:serverName', async (req, res) => {
     const { serverName } = req.params;
     const { hours = 1 } = req.query;
+    const scoring_profile = normalizeScoringProfile(req.query.scoring_profile || req.query.profile);
     
     // Calculate time range
     const endTime = new Date();
@@ -193,7 +202,8 @@ app.get('/api/performance/:serverName', async (req, res) => {
             start_time: { seconds: Math.floor(startTime.getTime() / 1000), nanos: 0 },
             end_time: { seconds: Math.floor(endTime.getTime() / 1000), nanos: 0 }
         },
-        pagination: { page: 1, page_size: 1000 } // Fetch plenty for charts
+        pagination: { page: 1, page_size: 1000 }, // Fetch plenty for charts
+        scoring_profile
     };
 
     try {
@@ -208,11 +218,13 @@ app.get('/api/performance/:serverName', async (req, res) => {
 app.get('/api/rank', async (req, res) => {
     try {
         const order = (req.query.order || 'DESC').toUpperCase();
+        const scoring_profile = normalizeScoringProfile(req.query.scoring_profile || req.query.profile);
         const page = parseInt(req.query.page, 10) || 1;
         const page_size = parseInt(req.query.page_size, 10) || 20;
         const response = await promisifyGrpc('QueryScoreRank', {
             order: order === 'ASC' ? 1 : 0,
-            pagination: { page, page_size }
+            pagination: { page, page_size },
+            scoring_profile
         });
         res.json(response);
     } catch (err) {
@@ -257,6 +269,7 @@ app.get('/api/trend/:serverName', async (req, res) => {
     try {
         const serverName = req.params.serverName;
         const hours = parseFloat(req.query.hours, 10) || 1;
+        const scoring_profile = normalizeScoringProfile(req.query.scoring_profile || req.query.profile);
         const interval_seconds = parseInt(req.query.interval_seconds, 10) || 300;
         const endTime = new Date();
         const startTime = new Date(endTime.getTime() - hours * 60 * 60 * 1000);
@@ -266,7 +279,8 @@ app.get('/api/trend/:serverName', async (req, res) => {
                 start_time: { seconds: Math.floor(startTime.getTime() / 1000), nanos: 0 },
                 end_time: { seconds: Math.floor(endTime.getTime() / 1000), nanos: 0 }
             },
-            interval_seconds
+            interval_seconds,
+            scoring_profile
         };
         const response = await promisifyGrpc('QueryTrend', request);
         res.json(response);
@@ -333,6 +347,27 @@ app.get('/api/softirq-detail', async (req, res) => {
     }
 });
 
+app.get('/api/cpu-core-detail', async (req, res) => {
+    try {
+        const serverName = req.query.server_name || '';
+        const hours = parseFloat(req.query.hours, 10) || 24;
+        const endTime = new Date();
+        const startTime = new Date(endTime.getTime() - hours * 60 * 60 * 1000);
+
+        const response = await promisifyGrpc('QueryCpuCoreDetail', {
+            server_name: serverName,
+            time_range: {
+                start_time: { seconds: Math.floor(startTime.getTime() / 1000), nanos: 0 },
+                end_time: { seconds: Math.floor(endTime.getTime() / 1000), nanos: 0 }
+            },
+            pagination: { page: 1, page_size: 2000 }
+        });
+        res.json(response);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 // Get all exposed query endpoints
 app.get('/api/query-endpoints', (req, res) => {
     res.json({
@@ -345,7 +380,7 @@ app.get('/api/query-endpoints', (req, res) => {
 // Socket.io for real-time pushing (Polling manager every 2s)
 setInterval(async () => {
     try {
-        const response = await promisifyGrpc('QueryLatestScore', {});
+        const response = await promisifyGrpc('QueryLatestScore', { scoring_profile: 'BALANCED' });
         const enriched = await enrichOverviewWithNetRates(response);
         io.emit('overview_update', enriched);
     } catch (err) {

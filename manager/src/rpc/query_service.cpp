@@ -15,6 +15,21 @@ TimeRange QueryServiceImpl::convert_time_range(
   return range;
 }
 
+ScoringProfile QueryServiceImpl::convert_scoring_profile(
+    ::monitor::proto::ScoringProfile profile) {
+  switch (profile) {
+    case ::monitor::proto::HIGH_CONCURRENCY:
+      return ScoringProfile::HIGH_CONCURRENCY;
+    case ::monitor::proto::IO_INTENSIVE:
+      return ScoringProfile::IO_INTENSIVE;
+    case ::monitor::proto::MEMORY_SENSITIVE:
+      return ScoringProfile::MEMORY_SENSITIVE;
+    case ::monitor::proto::BALANCED:
+    default:
+      return ScoringProfile::BALANCED;
+  }
+}
+
 void QueryServiceImpl::set_timestamp(
     ::google::protobuf::Timestamp* ts,
     const std::chrono::system_clock::time_point& tp) {
@@ -49,8 +64,10 @@ void QueryServiceImpl::set_timestamp(
   if (page_size < 1) page_size = 100;
 
   int total_count = 0;
+    auto scoring_profile = convert_scoring_profile(request->scoring_profile());
   auto records = _query_manager->query_performance(
-      request->server_name(), time_range, page, page_size, &total_count);
+      request->server_name(), time_range, page, page_size, &total_count,
+      scoring_profile);
 
   for (const auto& rec : records) {
     auto* proto_rec = response->add_records();
@@ -84,6 +101,7 @@ void QueryServiceImpl::set_timestamp(
   response->set_total_count(total_count);
   response->set_page(page);
   response->set_page_size(page_size);
+  response->set_scoring_profile(request->scoring_profile());
 
   return grpc::Status::OK;
 }
@@ -105,8 +123,10 @@ void QueryServiceImpl::set_timestamp(
                         "Invalid time range: start_time > end_time");
   }
 
-  auto records = _query_manager->query_trend(
-      request->server_name(), time_range, request->interval_seconds());
+    auto scoring_profile = convert_scoring_profile(request->scoring_profile());
+    auto records = _query_manager->query_trend(
+      request->server_name(), time_range, request->interval_seconds(),
+      scoring_profile);
 
   for (const auto& rec : records) {
     auto* proto_rec = response->add_records();
@@ -131,6 +151,7 @@ void QueryServiceImpl::set_timestamp(
   }
 
   response->set_interval_seconds(request->interval_seconds());
+  response->set_scoring_profile(request->scoring_profile());
 
   return grpc::Status::OK;
 }
@@ -213,8 +234,10 @@ void QueryServiceImpl::set_timestamp(
   if (page_size < 1) page_size = 100;
 
   int total_count = 0;
+  auto scoring_profile = convert_scoring_profile(request->scoring_profile());
   auto records =
-      _query_manager->query_score_rank(order, page, page_size, &total_count);
+      _query_manager->query_score_rank(order, page, page_size, &total_count,
+                                       scoring_profile);
 
   for (const auto& rec : records) {
     auto* proto_rec = response->add_servers();
@@ -233,6 +256,7 @@ void QueryServiceImpl::set_timestamp(
   response->set_total_count(total_count);
   response->set_page(page);
   response->set_page_size(page_size);
+  response->set_scoring_profile(request->scoring_profile());
 
   return grpc::Status::OK;
 }
@@ -250,7 +274,8 @@ void QueryServiceImpl::set_timestamp(
   }
 
   ClusterStats stats;
-  auto records = _query_manager->query_latest_score(&stats);
+  auto scoring_profile = convert_scoring_profile(request->scoring_profile());
+  auto records = _query_manager->query_latest_score(&stats, scoring_profile);
 
   for (const auto& rec : records) {
     auto* proto_rec = response->add_servers();
@@ -275,6 +300,7 @@ void QueryServiceImpl::set_timestamp(
   proto_stats->set_min_score(stats.min_score);
   proto_stats->set_best_server(stats.best_server);
   proto_stats->set_worst_server(stats.worst_server);
+  response->set_scoring_profile(request->scoring_profile());
 
   return grpc::Status::OK;
 }
@@ -458,6 +484,54 @@ void QueryServiceImpl::set_timestamp(
     proto_rec->set_net_rx(rec.net_rx);
     proto_rec->set_block(rec.block);
     proto_rec->set_sched(rec.sched);
+  }
+
+  response->set_total_count(total_count);
+  response->set_page(page);
+  response->set_page_size(page_size);
+
+  return grpc::Status::OK;
+}
+
+::grpc::Status QueryServiceImpl::QueryCpuCoreDetail(
+    ::grpc::ServerContext* context,
+    const ::monitor::proto::QueryDetailRequest* request,
+    ::monitor::proto::QueryCpuCoreDetailResponse* response) {
+  (void)context;
+
+  if (!_query_manager) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE,
+                        "Query manager not initialized");
+  }
+
+  TimeRange time_range = convert_time_range(request->time_range());
+  if (!_query_manager->validate_timerange(time_range)) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                        "Invalid time range: start_time > end_time");
+  }
+
+  int page = request->pagination().page();
+  int page_size = request->pagination().page_size();
+  if (page < 1) page = 1;
+  if (page_size < 1) page_size = 100;
+
+  int total_count = 0;
+  auto records = _query_manager->query_cpu_core_detail(
+      request->server_name(), time_range, page, page_size, &total_count);
+
+  for (const auto& rec : records) {
+    auto* proto_rec = response->add_records();
+    proto_rec->set_server_name(rec.server_name);
+    proto_rec->set_cpu_name(rec.cpu_name);
+    set_timestamp(proto_rec->mutable_timestamp(), rec.timestamp);
+    proto_rec->set_cpu_percent(rec.cpu_percent);
+    proto_rec->set_usr_percent(rec.usr_percent);
+    proto_rec->set_system_percent(rec.system_percent);
+    proto_rec->set_nice_percent(rec.nice_percent);
+    proto_rec->set_idle_percent(rec.idle_percent);
+    proto_rec->set_io_wait_percent(rec.io_wait_percent);
+    proto_rec->set_irq_percent(rec.irq_percent);
+    proto_rec->set_soft_irq_percent(rec.soft_irq_percent);
   }
 
   response->set_total_count(total_count);

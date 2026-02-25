@@ -7,6 +7,8 @@
 
 #include <mysql/mysql.h>
 
+#include "scoring_profile.hpp"
+
 namespace monitor {
 
 // 排序方式
@@ -159,6 +161,21 @@ struct SoftIrqDetailRecord {
   int64_t sched = 0;
 };
 
+// CPU 核心详细数据
+struct CpuCoreDetailRecord {
+  std::string server_name;
+  std::string cpu_name;
+  std::chrono::system_clock::time_point timestamp;
+  float cpu_percent = 0;
+  float usr_percent = 0;
+  float system_percent = 0;
+  float nice_percent = 0;
+  float idle_percent = 0;
+  float io_wait_percent = 0;
+  float irq_percent = 0;
+  float soft_irq_percent = 0;
+};
+
 // 查询管理器 - 封装MySQL查询逻辑
 class QueryManager {
  public:
@@ -179,12 +196,14 @@ class QueryManager {
   std::vector<PerformanceRecord> query_performance(const std::string& server_name,
                                                    const TimeRange& time_range,
                                                    int page, int page_size,
-                                                   int* total_count);
+                                                   int* total_count,
+                                                   ScoringProfile scoring_profile = ScoringProfile::BALANCED);
 
   // 变化率趋势查询（支持聚合）
   std::vector<PerformanceRecord> query_trend(const std::string& server_name,
                                              const TimeRange& time_range,
-                                             int interval_seconds);
+                                             int interval_seconds,
+                                             ScoringProfile scoring_profile = ScoringProfile::BALANCED);
 
   // 异常数据查询
   std::vector<AnomalyRecord> query_anomaly(const std::string& server_name,
@@ -196,10 +215,13 @@ class QueryManager {
   // 评分排序查询
   std::vector<ServerScoreSummary> query_score_rank(SortOrder order, int page,
                                                   int page_size,
-                                                  int* total_count);
+                                                  int* total_count,
+                                                  ScoringProfile scoring_profile = ScoringProfile::BALANCED);
 
   // 最新评分查询
-  std::vector<ServerScoreSummary> query_latest_score(ClusterStats* stats);
+  std::vector<ServerScoreSummary> query_latest_score(
+      ClusterStats* stats,
+      ScoringProfile scoring_profile = ScoringProfile::BALANCED);
 
   // 详细数据查询
   std::vector<NetDetailRecord> query_net_detail (const std::string& server_name,
@@ -218,6 +240,10 @@ class QueryManager {
                                                int* total_count);
 
   std::vector<SoftIrqDetailRecord> query_softirq_detail(
+      const std::string& server_name, const TimeRange& time_range, int page,
+      int page_size, int* total_count);
+
+    std::vector<CpuCoreDetailRecord> query_cpu_core_detail(
       const std::string& server_name, const TimeRange& time_range, int page,
       int page_size, int* total_count);
 
